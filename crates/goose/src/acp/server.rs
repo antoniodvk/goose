@@ -46,13 +46,12 @@ use crate::utils::sanitize_unicode_tags;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, Annotations, AuthMethod, AuthMethodAgent, AuthenticateRequest,
     AuthenticateResponse, BlobResourceContents, CancelNotification, CloseSessionRequest,
-    CloseSessionResponse,
-    ConfigOptionUpdate, ContentBlock, Cost, CurrentModeUpdate, DeleteSessionRequest,
-    DeleteSessionResponse, EmbeddedResourceResource, FileSystemCapabilities, ForkSessionRequest,
-    ForkSessionResponse, ImageContent, Implementation, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    McpCapabilities, McpServer, Meta, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+    CloseSessionResponse, ConfigOptionUpdate, ContentBlock, Cost, CurrentModeUpdate,
+    DeleteSessionRequest, DeleteSessionResponse, EmbeddedResourceResource, FileSystemCapabilities,
+    ForkSessionRequest, ForkSessionResponse, ImageContent, Implementation, InitializeRequest,
+    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, McpCapabilities, McpServer, Meta, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
     RequestPermissionOutcome, RequestPermissionRequest, ResourceLink, SessionCapabilities,
     SessionCloseCapabilities, SessionConfigOption, SessionDeleteCapabilities, SessionId,
     SessionInfoUpdate, SessionListCapabilities, SessionNotification, SessionUpdate,
@@ -651,7 +650,10 @@ async fn resolve_provider_default_model_config(
 /// `video/*` document so providers that accept video can send it to the model.
 /// Other blob resources are not forwarded.
 fn embedded_video_document(blob: &BlobResourceContents) -> Option<MessageContent> {
-    let mime_type = blob.mime_type.as_deref().filter(|m| is_video_media_type(m))?;
+    let mime_type = blob
+        .mime_type
+        .as_deref()
+        .filter(|m| is_video_media_type(m))?;
     let mut document =
         DocumentContent::new(blob.blob.clone(), mime_type).with_uri(blob.uri.clone());
     let name = Url::parse(&blob.uri).ok().and_then(|url| {
