@@ -648,6 +648,10 @@ struct GoogleRequest<'a> {
     generation_config: Option<GenerationConfig>,
 }
 
+fn is_gemini_3_or_newer(model_name: &str) -> bool {
+    crate::model::gemini_generation(model_name).is_some_and(|generation| generation >= 3)
+}
+
 fn get_thinking_config(
     model_config: &ModelConfig,
     thinking_budget: Option<i32>,
@@ -679,7 +683,7 @@ fn get_thinking_config(
         return None;
     }
     let model_name = model_config.model_name.to_lowercase();
-    let is_gemini_3 = model_name.starts_with("gemini-3");
+    let is_gemini_3 = is_gemini_3_or_newer(&model_name);
     let is_gemini_25 = model_name.starts_with("gemini-2.5");
     if !is_gemini_3 && !is_gemini_25 {
         return None;
@@ -764,10 +768,7 @@ fn create_request_impl(
     };
 
     let thinking_config = get_thinking_config(model_config, thinking_budget);
-    let temperature = (!model_config
-        .model_name
-        .to_lowercase()
-        .starts_with("gemini-3"))
+    let temperature = (!is_gemini_3_or_newer(&model_config.model_name))
     .then(|| model_config.temperature.map(|t| t as f64))
     .flatten();
 
@@ -781,13 +782,7 @@ fn create_request_impl(
         system_instruction: SystemInstruction {
             parts: [TextPart { text: system }],
         },
-        contents: format_messages(
-            messages,
-            model_config
-                .model_name
-                .to_lowercase()
-                .starts_with("gemini-3"),
-        ),
+        contents: format_messages(messages, is_gemini_3_or_newer(&model_config.model_name)),
         tools: tools_wrapper,
         generation_config,
     };
@@ -1914,5 +1909,28 @@ data: [DONE]"#;
         let payload = create_request(&config, "system", &[], &[]).unwrap();
 
         assert!(payload["generationConfig"].get("temperature").is_none());
+    }
+
+    #[test]
+    fn test_newer_gemini_generations_use_thinking_level() {
+        let config = ModelConfig::new("gemini-4-argon").with_thinking_effort(ThinkingEffort::High);
+        let thinking_config = get_thinking_config(&config, None).unwrap();
+        assert!(thinking_config.include_thoughts);
+        assert!(matches!(
+            thinking_config.thinking_level,
+            Some(ThinkingLevel::High)
+        ));
+        assert!(thinking_config.thinking_budget.is_none());
+
+        let config = ModelConfig::new("gemini-4-argon").with_temperature(Some(0.2));
+        let payload = create_request(&config, "system", &[], &[]).unwrap();
+        assert!(payload["generationConfig"].get("temperature").is_none());
+
+        assert_eq!(crate::model::gemini_generation("gemini-4-argon"), Some(4));
+        assert_eq!(crate::model::gemini_generation("google/gemini-3.1-pro"), Some(3));
+        assert_eq!(crate::model::gemini_generation("gemini-2.5-flash"), Some(2));
+        assert_eq!(crate::model::gemini_generation("gemini-exp-1206"), None);
+        assert_eq!(crate::model::gemini_generation("notgemini-4"), None);
+        assert!(ModelConfig::new("gemini-4-argon").is_reasoning_model());
     }
 }

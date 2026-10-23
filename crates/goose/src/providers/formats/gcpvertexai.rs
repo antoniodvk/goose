@@ -108,13 +108,18 @@ impl GcpVertexAIModel {
     ///
     /// Location routing by model family:
     /// - Claude models: Ohio (us-east5)
-    /// - Gemini 3.x models: Global
+    /// - Gemini 3 and newer models: Global
     /// - Other Gemini models: Iowa (us-central1)
     /// - MaaS models: Iowa (us-central1)
     pub fn known_location(&self) -> GcpLocation {
         match self {
             Self::Claude(_) => GcpLocation::Ohio,
-            Self::Gemini(name) if name.starts_with("gemini-3") => GcpLocation::Global,
+            Self::Gemini(name)
+                if goose_providers::model::gemini_generation(name)
+                    .is_some_and(|generation| generation >= 3) =>
+            {
+                GcpLocation::Global
+            }
             Self::Gemini(_) => GcpLocation::Iowa,
             Self::MaaS(_, _) => GcpLocation::Iowa,
         }
@@ -374,6 +379,9 @@ mod tests {
 
         let gemini_3_model = GcpVertexAIModel::try_from("gemini-3.1-flash-lite")?;
         assert_eq!(gemini_3_model.known_location(), GcpLocation::Global);
+
+        let gemini_4_model = GcpVertexAIModel::try_from("gemini-4-argon")?;
+        assert_eq!(gemini_4_model.known_location(), GcpLocation::Global);
 
         Ok(())
     }
