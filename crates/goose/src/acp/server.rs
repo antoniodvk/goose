@@ -627,7 +627,10 @@ fn resolve_default_provider_model_config(
 /// `video/*` document so providers that accept video can send it to the model.
 /// Other blob resources are not forwarded.
 fn embedded_video_document(blob: &BlobResourceContents) -> Option<MessageContent> {
-    let mime_type = blob.mime_type.as_deref().filter(|m| is_video_media_type(m))?;
+    let mime_type = blob
+        .mime_type
+        .as_deref()
+        .filter(|m| is_video_media_type(m))?;
     let mut document =
         DocumentContent::new(blob.blob.clone(), mime_type).with_uri(blob.uri.clone());
     let name = Url::parse(&blob.uri).ok().and_then(|url| {
@@ -641,7 +644,6 @@ fn embedded_video_document(blob: &BlobResourceContents) -> Option<MessageContent
     }
     Some(MessageContent::Document(document))
 }
->>>>>>> 28c7974d8 (feat(acp): pass embedded video from ACP prompts to video-capable providers)
 fn render_resource_link(link: &ResourceLink) -> String {
     let inlined_file = Url::parse(&link.uri)
         .ok()
