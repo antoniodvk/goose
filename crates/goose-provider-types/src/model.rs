@@ -37,6 +37,23 @@ pub fn is_goose_internal_request_param(key: &str) -> bool {
     )
 }
 
+/// Major Gemini generation from a model name such as `gemini-4-argon`,
+/// `gemini-3.1-pro-preview` or `google/gemini-3-flash`, so newer generations
+/// inherit Gemini 3 behavior without being listed by name.
+pub fn gemini_generation(model_name: &str) -> Option<u32> {
+    let lower = model_name.to_lowercase();
+    lower.match_indices("gemini-").find_map(|(index, prefix)| {
+        if index > 0 && !matches!(lower.as_bytes()[index - 1], b'/' | b'-') {
+            return None;
+        }
+        let rest = &lower[index + prefix.len()..];
+        let digits = rest
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(rest.len());
+        rest[..digits].parse().ok()
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelConfig {
     pub model_name: String,
@@ -348,8 +365,7 @@ impl ModelConfig {
     }
 
     fn is_gemini3_reasoning_model_name(model_name: &str) -> bool {
-        let lower = model_name.to_lowercase();
-        lower.starts_with("gemini-3") || lower.contains("/gemini-3") || lower.contains("-gemini-3")
+        gemini_generation(model_name).is_some_and(|generation| generation >= 3)
     }
 
     pub fn max_output_tokens(&self) -> i32 {
