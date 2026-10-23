@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -29,11 +30,44 @@ impl ProviderManager {
             return Ok(provider.clone());
         }
 
-        let entry = crate::providers::get_from_registry(&name).await?;
+        let (provider, session_bound) = self.build(session, &name).await?;
+        *slot = session_bound.then_some(provider.clone());
+        Ok(provider)
+    }
+
+    /// Builds the provider a switch selects without leasing it to the session.
+    /// The switch leases it with `install` once the selection is persisted:
+    /// until then lookups still read the previous selection, and leasing early
+    /// lets such a lookup discard the new provider so it is built twice.
+    pub async fn build_for_switch(&self, session: &Session) -> Result<(Arc<dyn Provider>, bool)> {
+        let name = provider_name_for(session)?;
+        let leased = self.slot(&session.id).lock().await.clone();
+        if let Some(provider) = leased.filter(|p| p.get_name() == name) {
+            return Ok((provider, true));
+        }
+        self.build(session, &name).await
+    }
+
+    /// Leases a provider from `build_for_switch` after `persist` has recorded
+    /// the selection, holding the slot so no lookup sees one without the other.
+    pub async fn install(
+        &self,
+        session_id: &str,
+        provider: Arc<dyn Provider>,
+        session_bound: bool,
+        persist: impl Future<Output = Result<()>>,
+    ) -> Result<()> {
+        let slot = self.slot(session_id);
+        let mut slot = slot.lock().await;
+        persist.await?;
+        *slot = session_bound.then_some(provider);
+        Ok(())
+    }
+
+    async fn build(&self, session: &Session, name: &str) -> Result<(Arc<dyn Provider>, bool)> {
+        let entry = crate::providers::get_from_registry(name).await?;
         if !entry.session_bound() {
-            let provider = self.shared(&name, &entry).await?;
-            *slot = None;
-            return Ok(provider);
+            return Ok((self.shared(name, &entry).await?, false));
         }
 
         let extensions = EnabledExtensionsState::extensions_or_default(
@@ -51,8 +85,7 @@ impl ProviderManager {
             .update_mode(&session.id, session.goose_mode)
             .await
             .map_err(|e| anyhow!("Failed to propagate mode to provider: {e}"))?;
-        *slot = Some(provider.clone());
-        Ok(provider)
+        Ok((provider, true))
     }
 
     /// The provider already serving the session, if any; never builds one.

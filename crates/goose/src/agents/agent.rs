@@ -1074,10 +1074,10 @@ impl Agent {
 
         session.provider_name = Some(provider_name.to_string());
         session.model_config = Some(model_config.clone());
-        let provider = self
+        let (provider, session_bound) = self
             .config
             .providers
-            .provider_for(&session)
+            .build_for_switch(&session)
             .await
             .map_err(|error| provider_creation_error(error, "Could not create provider"))?;
 
@@ -1102,15 +1102,21 @@ impl Agent {
             warn!("Failed to apply model selection to provider: {e}");
         }
 
+        let persist = async {
+            self.config
+                .session_manager
+                .clone()
+                .update(session_id)
+                .provider_name(provider_name)
+                .model_config(model_config)
+                .apply()
+                .await
+                .context("Failed to persist provider config to session")
+        };
         self.config
-            .session_manager
-            .clone()
-            .update(session_id)
-            .provider_name(provider_name)
-            .model_config(model_config)
-            .apply()
+            .providers
+            .install(session_id, provider, session_bound, persist)
             .await
-            .context("Failed to persist provider config to session")
     }
 
     pub async fn update_goose_mode(&self, mode: GooseMode, session_id: &str) -> Result<()> {
