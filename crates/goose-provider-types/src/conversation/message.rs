@@ -293,6 +293,10 @@ pub struct DocumentContent {
     pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Where the client says the document lives (ACP resource `uri`). Kept so a
+    /// replayed session can hand the same resource back to the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
 }
 
 impl DocumentContent {
@@ -301,7 +305,13 @@ impl DocumentContent {
             data: data.into(),
             mime_type: mime_type.into(),
             name: None,
+            uri: None,
         }
+    }
+
+    pub fn with_uri<S: Into<String>>(mut self, uri: S) -> Self {
+        self.uri = Some(uri.into());
+        self
     }
 
     pub fn with_name<S: Into<String>>(mut self, name: S) -> Self {
@@ -1443,6 +1453,30 @@ mod document_tests {
 
         let restored: Message = serde_json::from_value(json).unwrap();
         assert_eq!(restored, message);
+    }
+
+    #[test]
+    fn document_content_uri_round_trips_and_older_sessions_load_without_it() {
+        let document = DocumentContent::new("dmlkZW8=", "video/mp4")
+            .with_name("clip.mp4")
+            .with_uri("file:///uploads/clip.mp4");
+        let message = Message::user().with_content(MessageContent::Document(document));
+
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(json["content"][0]["uri"], "file:///uploads/clip.mp4");
+        let restored: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, message);
+
+        let mut stored_before_uri_existed = serde_json::to_value(&message).unwrap();
+        stored_before_uri_existed["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("uri");
+        let restored: Message = serde_json::from_value(stored_before_uri_existed).unwrap();
+        let MessageContent::Document(document) = &restored.content[0] else {
+            panic!("expected document content");
+        };
+        assert_eq!(document.uri, None);
     }
 }
 

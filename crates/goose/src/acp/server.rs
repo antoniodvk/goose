@@ -24,8 +24,8 @@ use crate::config::paths::Paths;
 use crate::config::permission::PermissionManager;
 use crate::config::{Config, GooseMode};
 use crate::conversation::message::{
-    ActionRequiredData, Message, MessageContent, SystemNotificationContent, SystemNotificationType,
-    ToolConfirmationRequest, ToolRequest, ToolResponse,
+    ActionRequiredData, DocumentContent, Message, MessageContent, SystemNotificationContent,
+    SystemNotificationType, ToolConfirmationRequest, ToolRequest, ToolResponse,
 };
 use crate::conversation::Conversation;
 use crate::execution::manager::{AgentManager, RuntimeContext};
@@ -45,7 +45,8 @@ use crate::source_roots::SourceRoot;
 use crate::utils::sanitize_unicode_tags;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, Annotations, AuthMethod, AuthMethodAgent, AuthenticateRequest,
-    AuthenticateResponse, CancelNotification, CloseSessionRequest, CloseSessionResponse,
+    AuthenticateResponse, BlobResourceContents, CancelNotification, CloseSessionRequest,
+    CloseSessionResponse,
     ConfigOptionUpdate, ContentBlock, Cost, CurrentModeUpdate, DeleteSessionRequest,
     DeleteSessionResponse, EmbeddedResourceResource, FileSystemCapabilities, ForkSessionRequest,
     ForkSessionResponse, ImageContent, Implementation, InitializeRequest, InitializeResponse,
@@ -69,6 +70,7 @@ use anyhow::Result;
 use fs_err as fs;
 use futures::future::{BoxFuture, FutureExt};
 use futures::stream::{self, BoxStream, StreamExt};
+use goose_providers::documents::is_video_media_type;
 use goose_providers::errors::ProviderError;
 use rmcp::model::{
     Annotations as RmcpAnnotations, ImageContent as RmcpImageContent, Role,
@@ -643,6 +645,25 @@ async fn resolve_provider_default_model_config(
         agent_client_protocol::Error::internal_error()
             .data(format!("Failed to resolve model: {}", error))
     })
+}
+
+/// A video the client embedded in the prompt as a blob resource. It becomes a
+/// `video/*` document so providers that accept video can send it to the model.
+/// Other blob resources are not forwarded.
+fn embedded_video_document(blob: &BlobResourceContents) -> Option<MessageContent> {
+    let mime_type = blob.mime_type.as_deref().filter(|m| is_video_media_type(m))?;
+    let mut document =
+        DocumentContent::new(blob.blob.clone(), mime_type).with_uri(blob.uri.clone());
+    let name = Url::parse(&blob.uri).ok().and_then(|url| {
+        url.path_segments()?
+            .next_back()
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+    });
+    if let Some(name) = name {
+        document = document.with_name(name);
+    }
+    Some(MessageContent::Document(document))
 }
 
 fn render_resource_link(link: &ResourceLink) -> String {
@@ -1321,14 +1342,19 @@ impl GooseAcpAgent {
                     message = message.with_content(MessageContent::Image(content));
                 }
                 ContentBlock::Resource(resource) => {
-                    if let EmbeddedResourceResource::TextResourceContents(text_resource) =
-                        &resource.resource
+                    let contents = &resource.resource;
+                    if let EmbeddedResourceResource::TextResourceContents(text_resource) = contents
                     {
                         let header = format!("--- Resource: {} ---\n", text_resource.uri);
                         let content = format!("{}{}\n---\n", header, text_resource.text);
                         message = message.with_content(MessageContent::Text(
                             annotated_prompt_text(&content, resource.annotations.as_ref()),
                         ));
+                    }
+                    if let EmbeddedResourceResource::BlobResourceContents(blob) = contents {
+                        if let Some(video) = embedded_video_document(blob) {
+                            message = message.with_content(video);
+                        }
                     }
                 }
                 ContentBlock::ResourceLink(link) => {
@@ -3301,6 +3327,55 @@ print(\"hello, world\")
         assert!(content.contains("Tell me what is inside"));
         assert!(content.contains("\"name\":\"logs\""));
         assert!(content.contains(&serde_json::to_string(&uri).unwrap()));
+    }
+
+    #[test]
+    fn convert_acp_prompt_keeps_embedded_video_as_document() {
+        let prompt = vec![
+            ContentBlock::Text(TextContent::new("What happens in this clip?")),
+            ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::BlobResourceContents(
+                    BlobResourceContents::new("dmlkZW8=", "file:///C:/uploads/my%20clip.mp4")
+                        .mime_type(Some("video/mp4".to_string())),
+                ),
+            )),
+        ];
+
+        let message = GooseAcpAgent::convert_acp_prompt_to_message(&prompt);
+
+        assert_eq!(message.content.len(), 2);
+        let MessageContent::Document(document) = &message.content[1] else {
+            panic!("expected a document, got {:?}", message.content[1]);
+        };
+        assert_eq!(document.data, "dmlkZW8=");
+        assert_eq!(document.mime_type, "video/mp4");
+        assert_eq!(document.name.as_deref(), Some("my%20clip.mp4"));
+        assert_eq!(
+            document.uri.as_deref(),
+            Some("file:///C:/uploads/my%20clip.mp4")
+        );
+    }
+
+    #[test]
+    fn convert_acp_prompt_ignores_non_video_blob_resources() {
+        let prompt = vec![
+            ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::BlobResourceContents(
+                    BlobResourceContents::new("cGRm", "file:///report.pdf")
+                        .mime_type(Some("application/pdf".to_string())),
+                ),
+            )),
+            ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::BlobResourceContents(BlobResourceContents::new(
+                    "AAAA",
+                    "file:///unknown.bin",
+                )),
+            )),
+        ];
+
+        let message = GooseAcpAgent::convert_acp_prompt_to_message(&prompt);
+
+        assert!(message.content.is_empty());
     }
 
     #[test]
