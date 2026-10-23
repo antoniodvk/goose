@@ -16,7 +16,7 @@ use crate::canonical::{maybe_get_canonical_model_with_variant_fallback, strip_op
 use crate::conversation::message::Message;
 use crate::decision::{DecisionProvider, DecisionRequest, DecisionResponse};
 use crate::errors::ProviderError;
-use crate::formats::openai::create_request;
+use crate::formats::openai::{create_request_with_options, OpenAiFormatOptions};
 use crate::http_status::read_json_response;
 use crate::model::ModelConfig;
 use crate::openai_compatible::{handle_status, stream_openai_compat};
@@ -620,13 +620,20 @@ impl Provider for OpenRouterProvider {
             model_config
         };
 
-        let mut payload = create_request(
+        let mut payload = create_request_with_options(
             model_config,
             system,
             messages,
             tools,
             &ImageFormat::OpenAi,
             true,
+            OpenAiFormatOptions {
+                preserve_thinking_context: true,
+                supports_vision: model_config.supports_vision.unwrap_or_default(),
+                // OpenRouter takes `video_url` parts; the model decides whether it can use them.
+                supports_video: true,
+                ..Default::default()
+            },
         )?;
 
         if !session_id.is_empty() {

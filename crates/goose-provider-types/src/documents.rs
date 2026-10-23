@@ -16,6 +16,23 @@ pub fn document_media_type_is_supported(mime_type: &str) -> bool {
     SUPPORTED_DOCUMENT_MEDIA_TYPES.contains(&mime_type)
 }
 
+/// Video travels as a document whose media type is `video/*`. Only providers
+/// that accept video input (OpenRouter, Gemini) send it; everyone else reports it
+/// as unsupported like any other document type.
+pub fn is_video_media_type(mime_type: &str) -> bool {
+    mime_type.starts_with("video/")
+}
+
+/// OpenRouter's chat-completions video part (`video_url` with a data URL).
+pub fn convert_video_url(document: &DocumentContent) -> Value {
+    json!({
+        "type": "video_url",
+        "video_url": {
+            "url": format!("data:{};base64,{}", document.mime_type, document.data),
+        }
+    })
+}
+
 pub fn convert_document(document: &DocumentContent, format: &DocumentFormat) -> Value {
     match format {
         DocumentFormat::OpenAi => json!({
@@ -62,6 +79,26 @@ pub const ASSISTANT_ROLE_REASON: &str = "documents can only be sent in user mess
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_media_types_are_recognised() {
+        assert!(is_video_media_type("video/mp4"));
+        assert!(is_video_media_type("video/quicktime"));
+        assert!(!is_video_media_type("application/pdf"));
+        assert!(!is_video_media_type("image/png"));
+    }
+
+    #[test]
+    fn convert_video_url_builds_a_data_url_part() {
+        let video = DocumentContent::new("AAAA", "video/mp4").with_name("clip.mp4");
+        assert_eq!(
+            convert_video_url(&video),
+            json!({
+                "type": "video_url",
+                "video_url": {"url": "data:video/mp4;base64,AAAA"}
+            })
+        );
+    }
 
     #[test]
     fn unsupported_document_text_names_the_document_and_reason() {
