@@ -832,6 +832,7 @@ impl Provider for OpenAiProvider {
                         || thinking_preservation_format.is_some(),
                     supports_vision,
                     thinking_preservation_format,
+                    ..Default::default()
                 },
             )?;
 

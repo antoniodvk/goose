@@ -2,8 +2,9 @@ use crate::base::ThinkingPreservationFormat;
 use crate::conversation::message::{Message, MessageContentBlock, ProviderMetadata};
 use crate::conversation::token_usage::{CostSource, ProviderUsage, Usage};
 use crate::documents::{
-    convert_document, document_media_type_is_supported, unsupported_document_text, DocumentFormat,
-    ASSISTANT_ROLE_REASON, UNSUPPORTED_MEDIA_TYPE_REASON,
+    convert_document, convert_video_url, document_media_type_is_supported, is_video_media_type,
+    unsupported_document_text, DocumentFormat, ASSISTANT_ROLE_REASON,
+    UNSUPPORTED_MEDIA_TYPE_REASON,
 };
 use crate::errors::ProviderError;
 use crate::images::{convert_image, detect_image_path, load_image_file, ImageFormat};
@@ -72,6 +73,9 @@ pub fn is_reserved_request_param_key(key: &str) -> bool {
 pub struct OpenAiFormatOptions {
     pub preserve_thinking_context: bool,
     pub supports_vision: bool,
+    /// Send `video/*` documents as `video_url` parts. Only OpenRouter accepts
+    /// them on this wire format; plain OpenAI-compatible endpoints reject them.
+    pub supports_video: bool,
     pub thinking_preservation_format: Option<ThinkingPreservationFormat>,
 }
 
@@ -469,6 +473,9 @@ pub fn format_messages_with_options(
                             "type": "text",
                             "text": unsupported_document_text(document, ASSISTANT_ROLE_REASON)
                         }));
+                    } else if options.supports_video && is_video_media_type(&document.mime_type) {
+                        has_non_text_content = true;
+                        content_array.push(convert_video_url(document));
                     } else if document_media_type_is_supported(&document.mime_type) {
                         has_non_text_content = true;
                         content_array.push(convert_document(document, &DocumentFormat::OpenAi));
@@ -2044,6 +2051,71 @@ mod document_tests {
         assert!(text.contains("rows.csv"), "{text}");
         assert!(text.contains("application/pdf"), "{text}");
         assert!(!text.contains("cm93cw=="), "{text}");
+    }
+
+    fn format_with_video(messages: &[Message], supports_video: bool) -> Vec<Value> {
+        format_messages_with_options(
+            messages,
+            &ImageFormat::OpenAi,
+            OpenAiFormatOptions {
+                supports_vision: true,
+                supports_video,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn user_video_becomes_a_video_url_part_when_supported() {
+        let spec = format_with_video(
+            &[Message::user().with_document(
+                "bW92LWJ5dGVz",
+                "video/mp4",
+                Some("clip.mp4".to_string()),
+            )],
+            true,
+        );
+
+        assert_eq!(spec.len(), 1);
+        assert_eq!(
+            spec[0]["content"][0],
+            json!({
+                "type": "video_url",
+                "video_url": {"url": "data:video/mp4;base64,bW92LWJ5dGVz"}
+            })
+        );
+    }
+
+    #[test]
+    fn user_video_becomes_a_text_part_when_not_supported() {
+        let spec = format_with_video(
+            &[Message::user().with_document(
+                "bW92LWJ5dGVz",
+                "video/mp4",
+                Some("clip.mp4".to_string()),
+            )],
+            false,
+        );
+
+        let text = spec[0]["content"].as_str().unwrap();
+        assert!(text.contains("clip.mp4"), "{text}");
+        assert!(!text.contains("bW92LWJ5dGVz"), "{text}");
+    }
+
+    #[test]
+    fn assistant_video_becomes_a_text_part_even_when_supported() {
+        let spec = format_with_video(
+            &[Message::assistant().with_document(
+                "bW92LWJ5dGVz",
+                "video/mp4",
+                Some("clip.mp4".to_string()),
+            )],
+            true,
+        );
+
+        let text = spec[0]["content"].as_str().unwrap();
+        assert!(text.contains("user messages"), "{text}");
+        assert!(!text.contains("bW92LWJ5dGVz"), "{text}");
     }
 }
 
@@ -5842,6 +5914,7 @@ data: [DONE]"#;
                 preserve_thinking_context: true,
                 supports_vision: false,
                 thinking_preservation_format: Some(format),
+                ..Default::default()
             },
         )
     }

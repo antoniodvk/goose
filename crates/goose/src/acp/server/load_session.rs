@@ -7,7 +7,7 @@ use super::tool_calls::conversion::{
 };
 use super::tool_calls::enrichment::tool_chain_summary;
 use super::*;
-use agent_client_protocol::schema::v1::ToolCall;
+use agent_client_protocol::schema::v1::{EmbeddedResource, ToolCall};
 
 fn replay_audience_annotations(audience: &[Role]) -> Annotations {
     Annotations::new().audience(
@@ -153,6 +153,21 @@ fn replay_conversation_to_client(
                         &session_id,
                         message,
                         ContentBlock::Image(image_content),
+                    )?;
+                }
+                MessageContent::Document(document) if is_video_media_type(&document.mime_type) => {
+                    let blob = BlobResourceContents::new(
+                        document.data.clone(),
+                        document.uri.clone().unwrap_or_default(),
+                    )
+                    .mime_type(Some(document.mime_type.clone()));
+                    send_replay_content_chunk(
+                        cx,
+                        &session_id,
+                        message,
+                        ContentBlock::Resource(EmbeddedResource::new(
+                            EmbeddedResourceResource::BlobResourceContents(blob),
+                        )),
                     )?;
                 }
                 MessageContent::ToolRequest(tool_request) => {

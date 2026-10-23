@@ -1,6 +1,7 @@
 use crate::conversation::token_usage::{ProviderUsage, Usage};
 use crate::documents::{
-    document_media_type_is_supported, unsupported_document_text, UNSUPPORTED_MEDIA_TYPE_REASON,
+    document_media_type_is_supported, is_video_media_type, unsupported_document_text,
+    UNSUPPORTED_MEDIA_TYPE_REASON,
 };
 use crate::errors::ProviderError;
 use crate::formats::openai::{is_valid_function_name, sanitize_function_name};
@@ -250,7 +251,10 @@ pub fn format_messages(messages: &[Message], nested_function_response_media: boo
                         }));
                     }
                     MessageContentBlock::Document(document) => {
-                        if document_media_type_is_supported(&document.mime_type) {
+                        // Gemini reads video as inline data like any other media part.
+                        if document_media_type_is_supported(&document.mime_type)
+                            || is_video_media_type(&document.mime_type)
+                        {
                             parts.push(json!({
                                 "inline_data": {
                                     "mime_type": document.mime_type,
@@ -965,6 +969,31 @@ mod tests {
         assert_eq!(
             payload[0]["parts"][0]["inline_data"]["data"],
             "base64pdfdata"
+        );
+    }
+
+    #[test]
+    fn test_message_to_google_spec_video_document_message() {
+        let messages = vec![Message::new(
+            Role::User,
+            0,
+            vec![MessageContentBlock::document(
+                "base64videodata".to_string(),
+                "video/mp4".to_string(),
+                Some("clip.mp4".to_string()),
+            )],
+        )];
+        let payload = format_messages(&messages, false);
+
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0]["role"], "user");
+        assert_eq!(
+            payload[0]["parts"][0]["inline_data"]["mime_type"],
+            "video/mp4"
+        );
+        assert_eq!(
+            payload[0]["parts"][0]["inline_data"]["data"],
+            "base64videodata"
         );
     }
 
