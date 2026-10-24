@@ -1236,6 +1236,13 @@ impl Config {
             } else {
                 Err(ConfigError::FallbackToFileStorage)
             }
+        } else if matches!(keyring_err, keyring::Error::TooLong(..)) {
+            // All secrets share one keyring entry, so its size limit is reached
+            // by their combined length, not by the secret being written.
+            Err(ConfigError::KeyringError(format!(
+                "{keyring_err}; all goose secrets share one keyring entry and together exceed \
+                 this limit. Set GOOSE_DISABLE_KEYRING=1 to store secrets in secrets.yaml instead"
+            )))
         } else {
             Err(ConfigError::KeyringError(keyring_err.to_string()))
         }
