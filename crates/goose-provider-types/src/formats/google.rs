@@ -769,8 +769,8 @@ fn create_request_impl(
 
     let thinking_config = get_thinking_config(model_config, thinking_budget);
     let temperature = (!is_gemini_3_or_newer(&model_config.model_name))
-    .then(|| model_config.temperature.map(|t| t as f64))
-    .flatten();
+        .then(|| model_config.temperature.map(|t| t as f64))
+        .flatten();
 
     let generation_config = Some(GenerationConfig {
         temperature,
@@ -1927,7 +1927,10 @@ data: [DONE]"#;
         assert!(payload["generationConfig"].get("temperature").is_none());
 
         assert_eq!(crate::model::gemini_generation("gemini-4-argon"), Some(4));
-        assert_eq!(crate::model::gemini_generation("google/gemini-3.1-pro"), Some(3));
+        assert_eq!(
+            crate::model::gemini_generation("google/gemini-3.1-pro"),
+            Some(3)
+        );
         assert_eq!(crate::model::gemini_generation("gemini-2.5-flash"), Some(2));
         assert_eq!(crate::model::gemini_generation("gemini-exp-1206"), None);
         assert_eq!(crate::model::gemini_generation("notgemini-4"), None);
