@@ -16,6 +16,54 @@ pub const DEFAULT_INITIAL_RETRY_INTERVAL_MS: u64 = 1000;
 pub const DEFAULT_BACKOFF_MULTIPLIER: f64 = 2.0;
 pub const DEFAULT_MAX_RETRY_INTERVAL_MS: u64 = 30_000;
 
+/// A provider request failed transiently and is about to be retried after `delay`.
+#[derive(Debug, Clone)]
+pub struct RetryNotice {
+    pub attempt: usize,
+    pub max_retries: usize,
+    pub delay: Duration,
+    /// `rate_limit`, `server_error` or `network`.
+    pub reason: &'static str,
+}
+
+pub type RetryNoticeFn = std::sync::Arc<dyn Fn(&RetryNotice) + Send + Sync>;
+
+#[cfg(not(target_arch = "wasm32"))]
+tokio::task_local! {
+    /// Set by the ACP server for the duration of a turn so silent provider
+    /// retries become visible to the client.
+    static RETRY_NOTICE: RetryNoticeFn;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn with_retry_notice<F>(notify: RetryNoticeFn, fut: F) -> F::Output
+where
+    F: Future,
+{
+    RETRY_NOTICE.scope(notify, fut).await
+}
+
+/// Reports an upcoming retry to the turn's listener, if any.
+pub fn notify_retry(attempt: usize, max_retries: usize, delay: Duration, error: &ProviderError) {
+    let reason = match error {
+        ProviderError::RateLimitExceeded { .. } => "rate_limit",
+        ProviderError::ServerError(_) => "server_error",
+        ProviderError::NetworkError(_) => "network",
+        _ => return,
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = RETRY_NOTICE.try_with(|notify| {
+        notify(&RetryNotice {
+            attempt,
+            max_retries,
+            delay,
+            reason,
+        })
+    });
+    #[cfg(target_arch = "wasm32")]
+    let _ = (attempt, max_retries, delay, reason);
+}
+
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts
@@ -147,6 +195,7 @@ where
                         _ => config.delay_for_attempt(attempts),
                     };
 
+                    notify_retry(attempts, config.max_retries, delay, &error);
                     sleep(delay).await;
                     continue;
                 }
@@ -256,6 +305,7 @@ impl<P: Provider> ProviderRetry for P {
                         if skip_backoff {
                             tracing::info!("Skipping backoff due to GOOSE_PROVIDER_SKIP_BACKOFF");
                         } else {
+                            notify_retry(attempts, config.max_retries, delay, &error);
                             tracing::info!("Backing off for {:?} before retry", delay);
                             sleep(delay).await;
                         }
