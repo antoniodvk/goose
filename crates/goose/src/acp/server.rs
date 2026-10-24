@@ -93,7 +93,7 @@ use self::message_meta::{
 use self::tool_calls::chain::{breaks_consecutive_tool_calls, ReadyToolChain, ToolChainTracker};
 use self::tool_calls::conversion::{
     build_initial_tool_call_with_message_meta, build_permission_tool_call_update,
-    tool_call_update_fields_from_response, tool_response_meta,
+    permission_tool_call_meta, tool_call_update_fields_from_response, tool_response_meta,
 };
 use self::tool_calls::enrichment::{spawn_chain_summary_enrichment, spawn_tool_title_enrichment};
 
@@ -774,6 +774,7 @@ struct PendingToolPermission {
     tool_name: String,
     arguments: serde_json::Map<String, serde_json::Value>,
     prompt: Option<String>,
+    tool_meta: Option<Meta>,
 }
 
 fn update_output_token_limit_reached(output_token_limit_reached: &mut bool, message: &Message) {
@@ -1430,6 +1431,13 @@ impl GooseAcpAgent {
                     arguments,
                     prompt,
                 } => {
+                    let tool_meta = match tool_requests.get(id) {
+                        Some(tool_request) => {
+                            permission_tool_meta(tool_request, &target.agent, &target.session_id)
+                                .await
+                        }
+                        None => None,
+                    };
                     self.handle_tool_permission_request(
                         cx,
                         session_id,
@@ -1438,6 +1446,7 @@ impl GooseAcpAgent {
                             tool_name: tool_name.clone(),
                             arguments: arguments.clone(),
                             prompt: prompt.clone(),
+                            tool_meta,
                         },
                         target.clone(),
                     )?;
@@ -1596,6 +1605,7 @@ impl GooseAcpAgent {
             &request.tool_name,
             request.arguments,
             request.prompt,
+            request.tool_meta,
         );
 
         fn option(kind: PermissionOptionKind) -> PermissionOption {
@@ -1663,6 +1673,26 @@ fn extract_client_supports_recipe_param_requests(
     goose_client_capabilities
         .and_then(|goose| goose.recipe_parameter_requests)
         .unwrap_or(false)
+}
+
+async fn permission_tool_meta(
+    tool_request: &ToolRequest,
+    agent: &Agent,
+    session_id: &str,
+) -> Option<Meta> {
+    let tool_name = tool_request.tool_call.as_ref().ok()?.name.to_string();
+    let extension_name = tool_request
+        .tool_name_parts()
+        .and_then(|parts| parts.extension_name)
+        .map(ToString::to_string);
+    let read_only_hint = agent
+        .list_tools(session_id, extension_name)
+        .await
+        .ok()
+        .and_then(|tools| tools.into_iter().find(|tool| tool.name == tool_name))
+        .and_then(|tool| tool.annotations)
+        .and_then(|annotations| annotations.read_only_hint);
+    permission_tool_call_meta(tool_request, read_only_hint)
 }
 
 fn outcome_to_confirmation(outcome: &RequestPermissionOutcome) -> PermissionConfirmation {
