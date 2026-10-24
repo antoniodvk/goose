@@ -642,7 +642,15 @@ pub(super) async fn connect(
                 "[OAuth:{}] Browser authorization flow failed: {:#}",
                 name, e
             );
-            Ok(Box::new(client_res?))
+            // Keep the OAuth failure next to the original 401/403; otherwise a
+            // failed sign-in (e.g. credentials that cannot be saved) is reported
+            // only as the server's auth challenge.
+            match client_res {
+                Ok(client) => Ok(Box::new(client)),
+                Err(error) => Err(ExtensionError::SetupError(format!(
+                    "{error}; OAuth authorization failed: {e:#}"
+                ))),
+            }
         }
     }
 }
