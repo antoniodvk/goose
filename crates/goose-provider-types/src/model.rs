@@ -46,11 +46,11 @@ pub fn gemini_generation(model_name: &str) -> Option<u32> {
         if index > 0 && !matches!(lower.as_bytes()[index - 1], b'/' | b'-') {
             return None;
         }
-        let rest = &lower[index + prefix.len()..];
+        let rest = lower.get(index + prefix.len()..)?;
         let digits = rest
             .find(|character: char| !character.is_ascii_digit())
             .unwrap_or(rest.len());
-        rest[..digits].parse().ok()
+        rest.get(..digits)?.parse().ok()
     })
 }
 
