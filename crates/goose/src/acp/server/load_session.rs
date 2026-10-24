@@ -155,7 +155,9 @@ fn replay_conversation_to_client(
                         ContentBlock::Image(image_content),
                     )?;
                 }
-                MessageContent::Document(document) if is_video_media_type(&document.mime_type) => {
+                MessageContent::Document(document)
+                    if is_embeddable_document_type(&document.mime_type) =>
+                {
                     let blob = BlobResourceContents::new(
                         document.data.clone(),
                         document.uri.clone().unwrap_or_default(),
