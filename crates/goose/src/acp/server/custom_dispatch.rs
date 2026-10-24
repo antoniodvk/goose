@@ -702,6 +702,14 @@ impl GooseAcpAgent {
         self.on_unarchive_session(req).await
     }
 
+    #[custom_method(SearchSessionsRequest)]
+    async fn dispatch_search_sessions(
+        &self,
+        req: SearchSessionsRequest,
+    ) -> Result<SearchSessionsResponse, agent_client_protocol::Error> {
+        self.on_search_sessions(req).await
+    }
+
     #[custom_method(CreateSourceRequest)]
     async fn dispatch_create_source(
         &self,

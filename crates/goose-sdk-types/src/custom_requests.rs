@@ -801,6 +801,22 @@ pub struct UnarchiveSessionRequest {
     pub session_id: String,
 }
 
+/// Find sessions whose user-visible text contains the query as one phrase,
+/// case-insensitive for all Unicode letters (e.g. umlauts).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
+#[request(method = "_goose/unstable/session/search", response = SearchSessionsResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSessionsRequest {
+    pub query: String,
+}
+
+/// Matching session ids, most recently updated first.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSessionsResponse {
+    pub session_ids: Vec<String>,
+}
+
 /// Export a session as a JSON or markdown string.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
 #[request(method = "_goose/unstable/session/export", response = ExportSessionResponse)]
