@@ -158,6 +158,9 @@ pub struct GcpVertexAIProvider {
     /// Retry configuration for handling rate limit errors
     #[serde(skip)]
     retry_config: RetryConfig,
+    /// Read timeout for one model request (`GCP_TIMEOUT`, seconds)
+    #[serde(skip)]
+    timeout: Duration,
     #[serde(skip)]
     name: String,
     #[serde(skip)]
@@ -179,10 +182,14 @@ impl GcpVertexAIProvider {
         let project_id = config.get_param("GCP_PROJECT_ID")?;
         let location = Self::determine_location(config)?;
         let host = Self::build_host_url(&location);
+        let timeout_secs: u64 = config
+            .get_param("GCP_TIMEOUT")
+            .unwrap_or(DEFAULT_PROVIDER_TIMEOUT_SECS);
+        let timeout = Duration::from_secs(timeout_secs);
 
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
-            .read_timeout(Duration::from_secs(DEFAULT_PROVIDER_TIMEOUT_SECS))
+            .read_timeout(timeout)
             .build()?;
 
         let auth = GcpAuth::new().await?;
@@ -197,6 +204,7 @@ impl GcpVertexAIProvider {
             project_id,
             location,
             retry_config,
+            timeout,
             name: GCP_VERTEX_AI_PROVIDER_NAME.to_string(),
             request_builder: crate::session_context::session_id_request_builder(),
         })
@@ -337,11 +345,7 @@ impl GcpVertexAIProvider {
 
             let request = (self.request_builder)(request)
                 .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
-            let response = goose_providers::http_status::send_bounded(
-                request,
-                Duration::from_secs(DEFAULT_PROVIDER_TIMEOUT_SECS),
-            )
-            .await?;
+            let response = goose_providers::http_status::send_bounded(request, self.timeout).await?;
 
             let status = response.status();
 
@@ -358,11 +362,19 @@ impl GcpVertexAIProvider {
                 let msg =
                     rate_limit_error_message(&read_error_body(response).await.unwrap_or_default());
                 tracing::warn!("429 (attempt {rate_limit_attempts}/{max_retries}): {msg}");
-                last_error = Some(ProviderError::RateLimitExceeded {
+                let error = ProviderError::RateLimitExceeded {
                     details: msg,
                     retry_delay: None,
-                });
-                sleep(self.retry_config.delay_for_attempt(rate_limit_attempts)).await;
+                };
+                let delay = self.retry_config.delay_for_attempt(rate_limit_attempts);
+                goose_providers::retry::notify_retry(
+                    rate_limit_attempts,
+                    max_retries,
+                    delay,
+                    &error,
+                );
+                last_error = Some(error);
+                sleep(delay).await;
             } else if status == *STATUS_API_OVERLOADED {
                 overloaded_attempts += 1;
                 if overloaded_attempts > max_retries {
@@ -376,11 +388,19 @@ impl GcpVertexAIProvider {
                 tracing::warn!(
                     "529 (attempt {overloaded_attempts}/{max_retries}): {OVERLOADED_ERROR_MSG}"
                 );
-                last_error = Some(ProviderError::RateLimitExceeded {
+                let error = ProviderError::RateLimitExceeded {
                     details: OVERLOADED_ERROR_MSG.to_string(),
                     retry_delay: None,
-                });
-                sleep(self.retry_config.delay_for_attempt(overloaded_attempts)).await;
+                };
+                let delay = self.retry_config.delay_for_attempt(overloaded_attempts);
+                goose_providers::retry::notify_retry(
+                    overloaded_attempts,
+                    max_retries,
+                    delay,
+                    &error,
+                );
+                last_error = Some(error);
+                sleep(delay).await;
             } else if status == StatusCode::OK {
                 return Ok(response);
             } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
@@ -587,6 +607,13 @@ impl goose_providers::base::ProviderDescriptor for GcpVertexAIProvider {
                     false,
                     false,
                     Some(&DEFAULT_MAX_RETRY_INTERVAL_MS.to_string()),
+                    false,
+                ),
+                ConfigKey::new(
+                    "GCP_TIMEOUT",
+                    false,
+                    false,
+                    Some(&DEFAULT_PROVIDER_TIMEOUT_SECS.to_string()),
                     false,
                 ),
             ],

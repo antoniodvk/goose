@@ -2048,6 +2048,34 @@ impl GooseAcpAgent {
         ))
     }
 
+    /// Forwards silent provider retries (429/529, 5xx, network) of the running
+    /// turn as `_meta.goose.providerRetry` so the client can show the wait.
+    fn retry_notice_sender(
+        cx: &ConnectionTo<Client>,
+        session_id: &SessionId,
+    ) -> goose_providers::retry::RetryNoticeFn {
+        let cx = cx.clone();
+        let session_id = session_id.clone();
+        Arc::new(move |notice| {
+            let mut goose = serde_json::Map::new();
+            goose.insert(
+                "providerRetry".to_string(),
+                serde_json::json!({
+                    "attempt": notice.attempt,
+                    "maxRetries": notice.max_retries,
+                    "delayMs": notice.delay.as_millis() as u64,
+                    "reason": notice.reason,
+                }),
+            );
+            let mut meta = serde_json::Map::new();
+            meta.insert("goose".to_string(), serde_json::Value::Object(goose));
+            let _ = cx.send_notification(SessionNotification::new(
+                session_id.clone(),
+                SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().meta(meta)),
+            ));
+        })
+    }
+
     async fn send_local_inference_progress_update(
         &self,
         cx: &ConnectionTo<Client>,
@@ -2396,7 +2424,11 @@ impl GooseAcpAgent {
         );
         #[cfg(feature = "otel")]
         let forward = opentelemetry::context::FutureExt::with_context(forward, trace_cx);
-        let stream_result = forward.await;
+        let stream_result = goose_providers::retry::with_retry_notice(
+            Self::retry_notice_sender(cx, &args.session_id),
+            forward,
+        )
+        .await;
         self.clear_active_run(&session_id, &run_id).await;
         Self::send_active_run_update(cx, &args.session_id, None)?;
         let usage_result = self

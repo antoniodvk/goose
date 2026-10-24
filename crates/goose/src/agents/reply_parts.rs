@@ -350,6 +350,12 @@ pub(crate) async fn stream_response_from_provider(
                             .parse::<bool>()
                             .unwrap_or(false);
                         if !skip_backoff {
+                            goose_providers::retry::notify_retry(
+                                attempts,
+                                retry_config.max_retries,
+                                delay,
+                                &error,
+                            );
                             tokio::time::sleep(delay).await;
                         }
 
