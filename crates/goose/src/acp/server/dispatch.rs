@@ -215,6 +215,32 @@ impl HandleDispatchFrom<Client> for GooseAcpHandler {
                             cx.send_notification(notification)?;
                             responder.respond(SetSessionConfigOptionResponse::new(config_options))?;
 
+                            // A new model can have a different context window; report it now
+                            // instead of waiting for the next turn or session/load.
+                            if config_id == "model" || config_id == "provider" {
+                                let usage_result = match agent.get_session_agent(&session_id.0).await {
+                                    Ok(session_agent) => agent
+                                        .send_session_usage_updates(
+                                            &cx,
+                                            &session_id,
+                                            &session_id.0,
+                                            &session_agent,
+                                            &mut None,
+                                        )
+                                        .await
+                                        .map(|_| ()),
+                                    Err(e) => Err(e),
+                                };
+                                if let Err(error) = usage_result {
+                                    warn!(
+                                        session_id = %session_id.0,
+                                        config_id = %config_id,
+                                        error = ?error,
+                                        "failed to send usage update after config change"
+                                    );
+                                }
+                            }
+
                             let maybe_refresh = if config_id == "provider" {
                                 let provider_id = value_id.0.to_string();
                                 agent
