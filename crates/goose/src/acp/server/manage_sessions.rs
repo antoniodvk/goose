@@ -250,4 +250,16 @@ impl GooseAcpAgent {
             .internal_err()?;
         Ok(EmptyResponse {})
     }
+
+    pub(super) async fn on_search_sessions(
+        &self,
+        req: SearchSessionsRequest,
+    ) -> Result<SearchSessionsResponse, agent_client_protocol::Error> {
+        let session_ids = self
+            .session_manager
+            .search_session_ids(&req.query, &ACP_VISIBLE_SESSION_TYPES)
+            .await
+            .internal_err()?;
+        Ok(SearchSessionsResponse { session_ids })
+    }
 }

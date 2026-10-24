@@ -714,6 +714,14 @@ impl SessionManager {
             .await
     }
 
+    pub async fn search_session_ids(
+        &self,
+        query: &str,
+        session_types: &[SessionType],
+    ) -> Result<Vec<String>> {
+        self.storage.search_session_ids(query, session_types).await
+    }
+
     pub async fn update_message_metadata<F>(&self, id: &str, message_id: &str, f: F) -> Result<()>
     where
         F: FnOnce(
@@ -2873,6 +2881,56 @@ impl SessionStorage {
         )
         .execute()
         .await
+    }
+
+    async fn search_session_ids(
+        &self,
+        query: &str,
+        session_types: &[SessionType],
+    ) -> Result<Vec<String>> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() || session_types.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // SQLite's LOWER only folds ASCII, so the match runs in Rust to cover umlauts.
+        let placeholders = session_types
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            SELECT m.session_id, json_extract(content.value, '$.text')
+            FROM messages m
+            INNER JOIN sessions s ON m.session_id = s.id
+            INNER JOIN json_each(m.content_json) AS content
+            WHERE m.role IN ('user', 'assistant')
+              AND {}
+              AND json_extract(content.value, '$.type') = 'text'
+              AND s.session_type IN ({})
+            ORDER BY s.updated_at DESC, m.id
+            "#,
+            user_visible_message_sql("m.metadata_json"),
+            placeholders
+        );
+        let mut q = sqlx::query_as::<_, (String, Option<String>)>(AssertSqlSafe(sql));
+        for session_type in session_types {
+            q = q.bind(session_type.to_string());
+        }
+
+        let pool = self.pool().await?;
+        let mut seen = std::collections::HashSet::new();
+        let mut session_ids = Vec::new();
+        for (session_id, text) in q.fetch_all(pool).await? {
+            if !seen.contains(&session_id)
+                && text.is_some_and(|text| text.to_lowercase().contains(&needle))
+            {
+                seen.insert(session_id.clone());
+                session_ids.push(session_id);
+            }
+        }
+        Ok(session_ids)
     }
 
     async fn update_message_metadata<F>(
