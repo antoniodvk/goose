@@ -67,7 +67,7 @@ use anyhow::Result;
 use fs_err as fs;
 use futures::future::{BoxFuture, FutureExt};
 use futures::stream::{self, BoxStream, StreamExt};
-use goose_providers::documents::is_video_media_type;
+use goose_providers::documents::{document_media_type_is_supported, is_video_media_type};
 use goose_providers::errors::ProviderError;
 use rmcp::model::{
     Annotations as RmcpAnnotations, ImageContent as RmcpImageContent, Role,
@@ -623,14 +623,23 @@ fn resolve_default_provider_model_config(
     Ok((resolved_provider, resolved_model_config))
 }
 
-/// A video the client embedded in the prompt as a blob resource. It becomes a
-/// `video/*` document so providers that accept video can send it to the model.
+    })
+}
+
+/// Whether a document of this media type travels through ACP as an embedded
+/// blob resource: a video or a document type providers accept (PDF).
+pub(crate) fn is_embeddable_document_type(mime_type: &str) -> bool {
+    is_video_media_type(mime_type) || document_media_type_is_supported(mime_type)
+}
+
+/// A video or PDF the client embedded in the prompt as a blob resource. It
+/// becomes a document so providers that accept it can send it to the model.
 /// Other blob resources are not forwarded.
-fn embedded_video_document(blob: &BlobResourceContents) -> Option<MessageContent> {
+fn embedded_document(blob: &BlobResourceContents) -> Option<MessageContent> {
     let mime_type = blob
         .mime_type
         .as_deref()
-        .filter(|m| is_video_media_type(m))?;
+        .filter(|m| is_embeddable_document_type(m))?;
     let mut document =
         DocumentContent::new(blob.blob.clone(), mime_type).with_uri(blob.uri.clone());
     let name = Url::parse(&blob.uri).ok().and_then(|url| {
@@ -1262,8 +1271,8 @@ impl GooseAcpAgent {
                         ));
                     }
                     if let EmbeddedResourceResource::BlobResourceContents(blob) = contents {
-                        if let Some(video) = embedded_video_document(blob) {
-                            message = message.with_content(video);
+                        if let Some(document) = embedded_document(blob) {
+                            message = message.with_content(document);
                         }
                     }
                 }
@@ -3289,12 +3298,32 @@ print(\"hello, world\")
     }
 
     #[test]
-    fn convert_acp_prompt_ignores_non_video_blob_resources() {
+    fn convert_acp_prompt_keeps_embedded_pdf_as_document() {
+        let prompt = vec![ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::BlobResourceContents(
+                BlobResourceContents::new("cGRm", "file:///report.pdf")
+                    .mime_type(Some("application/pdf".to_string())),
+            ),
+        ))];
+
+        let message = GooseAcpAgent::convert_acp_prompt_to_message(&prompt);
+
+        assert_eq!(message.content.len(), 1);
+        let MessageContent::Document(document) = &message.content[0] else {
+            panic!("expected a document, got {:?}", message.content[0]);
+        };
+        assert_eq!(document.data, "cGRm");
+        assert_eq!(document.mime_type, "application/pdf");
+        assert_eq!(document.name.as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn convert_acp_prompt_ignores_unsupported_blob_resources() {
         let prompt = vec![
             ContentBlock::Resource(EmbeddedResource::new(
                 EmbeddedResourceResource::BlobResourceContents(
-                    BlobResourceContents::new("cGRm", "file:///report.pdf")
-                        .mime_type(Some("application/pdf".to_string())),
+                    BlobResourceContents::new("AAAA", "file:///notes.txt")
+                        .mime_type(Some("text/plain".to_string())),
                 ),
             )),
             ContentBlock::Resource(EmbeddedResource::new(
