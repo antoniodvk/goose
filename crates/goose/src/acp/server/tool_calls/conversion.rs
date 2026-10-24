@@ -132,11 +132,32 @@ pub(crate) fn build_initial_tool_call_with_message_meta(
     tool_call.meta(merge_message_meta(meta, message))
 }
 
+pub(crate) fn permission_tool_call_meta(
+    tool_request: &ToolRequest,
+    read_only_hint: Option<bool>,
+) -> Option<Meta> {
+    let mut meta = goose_tool_call_meta(tool_request)?;
+    if let Some(read_only_hint) = read_only_hint {
+        if let Some(tool_call_meta) = meta
+            .get_mut("goose")
+            .and_then(|goose| goose.get_mut("toolCall"))
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            tool_call_meta.insert(
+                "readOnlyHint".to_string(),
+                serde_json::Value::Bool(read_only_hint),
+            );
+        }
+    }
+    Some(meta)
+}
+
 pub(crate) fn build_permission_tool_call_update(
     request_id: &str,
     tool_name: &str,
     arguments: serde_json::Map<String, serde_json::Value>,
     prompt: Option<String>,
+    meta: Option<Meta>,
 ) -> ToolCallUpdate {
     let arguments = serde_json::Value::Object(arguments);
     let mut fields = ToolCallUpdateFields::new()
@@ -151,7 +172,7 @@ pub(crate) fn build_permission_tool_call_update(
         ))]);
     }
 
-    ToolCallUpdate::new(ToolCallId::new(request_id), fields)
+    ToolCallUpdate::new(ToolCallId::new(request_id), fields).meta(meta)
 }
 
 fn json_u32(value: &serde_json::Value) -> Option<u32> {
@@ -563,6 +584,7 @@ mod tests {
                 "developer__shell",
                 arguments,
                 Some("Allow this command?".to_string()),
+                None,
             );
 
             assert_eq!(
@@ -574,6 +596,37 @@ mod tests {
             assert_eq!(
                 first_tool_call_text(&permission.fields),
                 Some("Allow this command?")
+            );
+            assert_eq!(permission.meta, None);
+        }
+
+        #[test]
+        fn carries_tool_identity_and_read_only_hint() {
+            let request = ToolRequest {
+                id: "req_1".to_string(),
+                tool_call: Ok(CallToolRequestParams::new("other__query-docs")),
+                metadata: None,
+                tool_meta: Some(serde_json::json!({"goose_extension": "context7"})),
+            };
+
+            let permission = build_permission_tool_call_update(
+                &request.id,
+                "other__query-docs",
+                Default::default(),
+                None,
+                permission_tool_call_meta(&request, Some(true)),
+            );
+
+            assert_eq!(permission.tool_call_id.0.to_string(), "req_1");
+            assert_eq!(
+                permission.meta.as_ref().and_then(|meta| meta.get("goose")),
+                Some(&serde_json::json!({
+                    "toolCall": {
+                        "toolName": "other__query-docs",
+                        "extensionName": "context7",
+                        "readOnlyHint": true,
+                    },
+                })),
             );
         }
     }

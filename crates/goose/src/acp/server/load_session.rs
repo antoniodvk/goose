@@ -252,6 +252,7 @@ impl GooseAcpAgent {
                     tool_name: request.tool_name.clone(),
                     arguments: request.arguments.clone(),
                     prompt: request.prompt.clone(),
+                    tool_meta: None,
                 },
                 SessionAgentTarget {
                     agent: agent.clone(),
