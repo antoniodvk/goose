@@ -1,5 +1,6 @@
 use super::message_meta::{
-    content_chunk_for_message, merge_message_meta, populate_output_token_limit_content,
+    content_chunk_for_message, error_chunk_for_message, merge_message_meta,
+    populate_output_token_limit_content,
 };
 use super::tool_calls::conversion::{
     build_initial_tool_call_with_message_meta, tool_call_update_fields_from_response,
@@ -206,12 +207,13 @@ fn replay_conversation_to_client(
                     ))?;
                 }
                 MessageContent::Error(error) => {
-                    send_replay_content_chunk(
-                        cx,
-                        &session_id,
-                        message,
-                        ContentBlock::Text(TextContent::new(error.message.clone())),
-                    )?;
+                    cx.send_notification(SessionNotification::new(
+                        session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(error_chunk_for_message(
+                            message,
+                            &error.message,
+                        )),
+                    ))?;
                 }
                 MessageContent::SystemNotification(_) => {}
                 _ => {}
