@@ -421,6 +421,11 @@
       "responseType": "EmptyResponse"
     },
     {
+      "method": "_goose/unstable/session/search",
+      "requestType": "SearchSessionsRequest_unstable",
+      "responseType": "SearchSessionsResponse_unstable"
+    },
+    {
       "method": "_goose/unstable/sources/create",
       "requestType": "CreateSourceRequest_unstable",
       "responseType": "CreateSourceResponse_unstable"

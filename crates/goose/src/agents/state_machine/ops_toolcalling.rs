@@ -15,7 +15,7 @@ use crate::agents::state_machine::{
     GooseEffect, Operation, OperationResult, SlashCommand,
 };
 use crate::agents::tool_execution::{
-    tool_stream, ToolCallResult, ToolStreamItem, declined_response, CHAT_MODE_TOOL_SKIPPED_RESPONSE,
+    declined_response, tool_stream, ToolCallResult, ToolStreamItem, CHAT_MODE_TOOL_SKIPPED_RESPONSE,
 };
 use crate::agents::AgentEvent;
 use crate::config::GooseMode;

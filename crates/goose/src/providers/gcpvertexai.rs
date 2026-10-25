@@ -345,7 +345,8 @@ impl GcpVertexAIProvider {
 
             let request = (self.request_builder)(request)
                 .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
-            let response = goose_providers::http_status::send_bounded(request, self.timeout).await?;
+            let response =
+                goose_providers::http_status::send_bounded(request, self.timeout).await?;
 
             let status = response.status();
 
@@ -959,6 +960,6 @@ mod tests {
         let metadata = GcpVertexAIProvider::metadata();
         assert!(!metadata.known_models.is_empty());
         assert_eq!(metadata.default_model, "gemini-2.5-flash");
-        assert_eq!(metadata.config_keys.len(), 6);
+        assert_eq!(metadata.config_keys.len(), 7);
     }
 }
