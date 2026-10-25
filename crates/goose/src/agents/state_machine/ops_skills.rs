@@ -21,7 +21,7 @@ use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, yielded_with, ConversationEffect, Emitter,
     GooseEffect, Operation, OperationResult, SlashCommand,
 };
-use crate::agents::tool_execution::{CHAT_MODE_TOOL_SKIPPED_RESPONSE, DECLINED_RESPONSE};
+use crate::agents::tool_execution::{declined_response, CHAT_MODE_TOOL_SKIPPED_RESPONSE};
 use crate::config::GooseMode;
 use crate::conversation::message::Message;
 use crate::conversation::Conversation;
@@ -415,7 +415,7 @@ impl Operation<Session, GooseEffect> for SkillOperation {
                     }
                 }
                 ToolDisposition::Decline => Ok(CallToolResult::error(vec![ContentBlock::text(
-                    DECLINED_RESPONSE,
+                    declined_response(&request),
                 )])),
                 ToolDisposition::ParseError(error) => {
                     Ok(CallToolResult::error(vec![ContentBlock::text(format!(

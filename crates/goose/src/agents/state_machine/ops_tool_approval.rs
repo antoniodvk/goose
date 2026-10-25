@@ -6,6 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::agents::state_machine::ops_toolcalling::request_was_advertised;
+use crate::agents::tool_execution::TOOL_BLOCKED_REASON_KEY;
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, ConversationEffect, Emitter, GooseEffect,
     Operation, OperationResult,
@@ -101,7 +102,15 @@ impl Operation<Session, GooseEffect> for ToolApprovalOperation<'_> {
                 );
 
             for request in permission_check_result.denied {
-                effects.push(mark_executable(&request.id, false));
+                let blocked_reason = inspection_results.iter().find(|result| {
+                    result.tool_request_id == request.id
+                        && result.inspector_name != "permission"
+                        && result.action == InspectionAction::Deny
+                });
+                match blocked_reason {
+                    Some(result) => effects.push(mark_blocked(&request.id, &result.reason)),
+                    None => effects.push(mark_executable(&request.id, false)),
+                }
             }
 
             for request in permission_check_result.needs_approval {
@@ -284,6 +293,17 @@ fn mark_executable(tool_call_id: &str, executable: bool) -> GooseEffect {
     ConversationEffect::PatchToolRequestMeta {
         tool_call_id: tool_call_id.to_string(),
         patch: serde_json::json!({ TOOL_EXECUTABLE_KEY: executable }),
+    }
+    .into()
+}
+
+fn mark_blocked(tool_call_id: &str, reason: &str) -> GooseEffect {
+    ConversationEffect::PatchToolRequestMeta {
+        tool_call_id: tool_call_id.to_string(),
+        patch: serde_json::json!({
+            TOOL_EXECUTABLE_KEY: false,
+            TOOL_BLOCKED_REASON_KEY: reason,
+        }),
     }
     .into()
 }

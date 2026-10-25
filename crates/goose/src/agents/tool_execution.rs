@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use std::path::PathBuf;
 
 use crate::agents::container::Container;
-use crate::conversation::message::Message;
+use crate::conversation::message::{Message, ToolRequest};
 use crate::mcp_utils::ToolResult;
 use rmcp::model::ServerNotification;
 
@@ -151,6 +151,27 @@ where
 pub const DECLINED_RESPONSE: &str = "The user has declined to run this tool. \
     DO NOT attempt to call this tool again. \
     If there are no alternative methods to proceed, clearly explain the situation and STOP.";
+
+/// Tool meta key holding the reason a security inspector blocked the call.
+pub const TOOL_BLOCKED_REASON_KEY: &str = "goose.blocked_reason";
+
+/// Response for a declined tool call: the security block reason when an inspector
+/// blocked it, otherwise the user's decline.
+pub fn declined_response(request: &ToolRequest) -> String {
+    let reason = request
+        .tool_meta
+        .as_ref()
+        .and_then(|meta| meta.get(TOOL_BLOCKED_REASON_KEY))
+        .and_then(|value| value.as_str());
+    match reason {
+        Some(reason) => format!(
+            "Blocked by the security check, not declined by the user. Reason: {reason}\n\
+             DO NOT attempt this tool call again or work around the block. \
+             Tell the user what was blocked and why, then STOP."
+        ),
+        None => DECLINED_RESPONSE.to_string(),
+    }
+}
 
 pub const CHAT_MODE_TOOL_SKIPPED_RESPONSE: &str = "Let the user know the tool call was skipped in goose chat mode. \
                                         DO NOT apologize for skipping the tool call. DO NOT say sorry. \
