@@ -171,6 +171,8 @@ import type {
   ScanRecipeRequest_unstable,
   ScanRecipeResponse_unstable,
   ScheduleRecipeRequest_unstable,
+  SearchSessionsRequest_unstable,
+  SearchSessionsResponse_unstable,
   SetConfigExtensionEnabledRequest_unstable,
   SetRecipeSlashCommandRequest_unstable,
   SetSessionSystemPromptRequest_unstable,
@@ -260,6 +262,7 @@ import {
   zRunScheduleNowResponse_unstable,
   zSaveRecipeResponse_unstable,
   zScanRecipeResponse_unstable,
+  zSearchSessionsResponse_unstable,
   zSetToolPermissionsResponse_unstable,
   zSteerSessionResponse_unstable,
   zUpdateScheduleResponse_unstable,
@@ -1113,6 +1116,18 @@ export class GooseExtClient {
     params: UnarchiveSessionRequest_unstable,
   ): Promise<void> {
     await this.conn.request("_goose/unstable/session/unarchive", params);
+  }
+
+  async sessionSearch_unstable(
+    params: SearchSessionsRequest_unstable,
+  ): Promise<SearchSessionsResponse_unstable> {
+    const raw = await this.conn.request(
+      "_goose/unstable/session/search",
+      params,
+    );
+    return zSearchSessionsResponse_unstable.parse(
+      raw,
+    ) as SearchSessionsResponse_unstable;
   }
 
   async sourcesCreate_unstable(

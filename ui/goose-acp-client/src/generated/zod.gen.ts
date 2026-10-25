@@ -1627,6 +1627,21 @@ export const zUnarchiveSessionRequest_unstable = z.object({
 });
 
 /**
+ * Find sessions whose user-visible text contains the query as one phrase,
+ * case-insensitive for all Unicode letters (e.g. umlauts).
+ */
+export const zSearchSessionsRequest_unstable = z.object({
+    query: z.string()
+});
+
+/**
+ * Matching session ids, most recently updated first.
+ */
+export const zSearchSessionsResponse_unstable = z.object({
+    sessionIds: z.array(z.string())
+});
+
+/**
  * The type of source entity.
  */
 export const zSourceType = z.enum([
@@ -2391,6 +2406,7 @@ export const zExtRequest = z.object({
             zRenameSessionRequest_unstable,
             zArchiveSessionRequest_unstable,
             zUnarchiveSessionRequest_unstable,
+            zSearchSessionsRequest_unstable,
             zCreateSourceRequest_unstable,
             zListSourcesRequest_unstable,
             zListAgentMentionsRequest_unstable,
@@ -2484,6 +2500,7 @@ export const zExtResponse = z.union([
                 zKillRunningJobResponse_unstable,
                 zInspectRunningJobResponse_unstable,
                 zGetSessionInfoResponse_unstable,
+                zSearchSessionsResponse_unstable,
                 zCreateSourceResponse_unstable,
                 zListSourcesResponse_unstable,
                 zListAgentMentionsResponse_unstable,

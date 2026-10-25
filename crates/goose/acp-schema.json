@@ -4990,6 +4990,37 @@
       "x-side": "agent",
       "x-method": "_goose/unstable/session/unarchive"
     },
+    "SearchSessionsRequest_unstable": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "description": "Find sessions whose user-visible text contains the query as one phrase,\ncase-insensitive for all Unicode letters (e.g. umlauts).",
+      "x-side": "agent",
+      "x-method": "_goose/unstable/session/search"
+    },
+    "SearchSessionsResponse_unstable": {
+      "type": "object",
+      "properties": {
+        "sessionIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "sessionIds"
+      ],
+      "description": "Matching session ids, most recently updated first.",
+      "x-side": "agent",
+      "x-method": "_goose/unstable/session/search"
+    },
     "CreateSourceRequest_unstable": {
       "type": "object",
       "properties": {
@@ -7818,6 +7849,15 @@
                 {
                   "allOf": [
                     {
+                      "$ref": "#/$defs/SearchSessionsRequest_unstable"
+                    }
+                  ],
+                  "description": "Params for _goose/unstable/session/search",
+                  "title": "SearchSessionsRequest_unstable"
+                },
+                {
+                  "allOf": [
+                    {
                       "$ref": "#/$defs/CreateSourceRequest_unstable"
                     }
                   ],
@@ -8534,6 +8574,14 @@
                         }
                       ],
                       "title": "GetSessionInfoResponse_unstable"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/$defs/SearchSessionsResponse_unstable"
+                        }
+                      ],
+                      "title": "SearchSessionsResponse_unstable"
                     },
                     {
                       "allOf": [
