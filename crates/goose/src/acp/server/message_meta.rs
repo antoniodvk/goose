@@ -1,5 +1,5 @@
 use crate::conversation::message::{Message, MessageContent};
-use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, MessageId, Meta};
+use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, MessageId, Meta, TextContent};
 use serde::Serialize;
 
 const OUTPUT_TOKEN_LIMIT_TEXT: &str =
@@ -73,6 +73,18 @@ pub(super) fn content_chunk_for_message(message: &Message, content: ContentBlock
     let mut chunk = ContentChunk::new(content).meta(message_meta(message));
     if let Some(message_id) = message.id.as_deref() {
         chunk = chunk.message_id(MessageId::new(message_id));
+    }
+    chunk
+}
+
+/// Error text as an agent chunk, marked with `_meta.goose.error` so clients can tell it apart from a reply,
+/// live and on replay.
+pub(super) fn error_chunk_for_message(message: &Message, text: &str) -> ContentChunk {
+    let mut chunk = content_chunk_for_message(message, ContentBlock::Text(TextContent::new(text)));
+    if let Some(serde_json::Value::Object(goose)) =
+        chunk.meta.as_mut().and_then(|meta| meta.get_mut("goose"))
+    {
+        goose.insert("error".to_string(), serde_json::Value::Bool(true));
     }
     chunk
 }
@@ -185,6 +197,22 @@ mod tests {
                 "outputTokenLimitReached": true,
                 "fallbackContent": true,
                 "steer": true,
+            })),
+        );
+    }
+
+    #[test]
+    fn error_chunk_is_marked_as_error() {
+        let message = Message::new(Role::Assistant, 1_700_000_000, vec![]).with_id("msg_err");
+        let chunk = error_chunk_for_message(&message, "Ran into this error");
+
+        assert_eq!(chunk.message_id, Some(MessageId::new("msg_err")));
+        assert_eq!(
+            chunk.meta.as_ref().and_then(|meta| meta.get("goose")),
+            Some(&serde_json::json!({
+                "created": 1_700_000_000,
+                "messageId": "msg_err",
+                "error": true,
             })),
         );
     }
