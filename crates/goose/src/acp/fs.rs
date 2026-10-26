@@ -404,6 +404,7 @@ impl McpClientTrait for AcpTools {
             .list_tools(session_id, next_cursor, cancellation_token)
             .await?;
         if self.fs_read {
+            result.tools.retain(|tool| tool.name != "read");
             result.tools.insert(0, read_tool());
         }
         Ok(result)
