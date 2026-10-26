@@ -218,16 +218,30 @@ fn cap_read_output(content: String, start_line: usize, total_lines: usize) -> St
     if content.len() <= OUTPUT_LIMIT_BYTES {
         return content;
     }
-    let mut cut = OUTPUT_LIMIT_BYTES;
-    while !content.is_char_boundary(cut) {
-        cut -= 1;
+    let mut kept = String::new();
+    let mut shown = 0;
+    for line in content.split_inclusive('\n') {
+        if kept.len() + line.len() > OUTPUT_LIMIT_BYTES {
+            break;
+        }
+        kept.push_str(line);
+        shown += 1;
     }
-    let cut = content[..cut].rfind('\n').map(|i| i + 1).unwrap_or(cut);
-    let shown = content[..cut].lines().count();
-    let last_line = start_line + shown.saturating_sub(1);
+    if shown == 0 {
+        // A single line longer than the limit: keep its start.
+        kept = content
+            .chars()
+            .scan(0, |len, c| {
+                *len += c.len_utf8();
+                (*len <= OUTPUT_LIMIT_BYTES).then_some(c)
+            })
+            .collect();
+        shown = 1;
+    }
+    let last_line = start_line + shown - 1;
     format!(
         "{}\n[Output limited to {} bytes: lines {}-{} of {}. Read more with line={} and limit.]",
-        &content[..cut],
+        kept,
         OUTPUT_LIMIT_BYTES,
         start_line,
         last_line,
