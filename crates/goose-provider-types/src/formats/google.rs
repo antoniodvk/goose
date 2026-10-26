@@ -50,15 +50,6 @@ fn insert_thought_signature(part: &mut Map<String, Value>, signature: &str) {
     part.insert(THOUGHT_SIGNATURE_KEY.to_string(), json!(signature));
 }
 
-fn maybe_insert_signature_from_metadata(
-    part: &mut Map<String, Value>,
-    metadata: &Option<ProviderMetadata>,
-) {
-    if let Some(signature) = get_thought_signature(metadata) {
-        insert_thought_signature(part, signature);
-    }
-}
-
 fn build_function_response_part(
     id: &str,
     name: &str,
@@ -217,28 +208,25 @@ pub fn format_messages(messages: &[Message], nested_function_response_media: boo
                                 .get(response.id.as_str())
                                 .map(String::as_str)
                                 .unwrap_or(response.id.as_str());
-                            let mut part =
-                                build_function_response_part(&response.id, name, text, media);
-                            if include_signature {
-                                maybe_insert_signature_from_metadata(&mut part, &response.metadata);
-                            }
-                            parts.push(json!(part));
+                            // Gemini expects signatures only on model parts, never on functionResponse
+                            parts.push(json!(build_function_response_part(
+                                &response.id,
+                                name,
+                                text,
+                                media
+                            )));
                         }
                         Err(e) => {
                             let name = tool_names
                                 .get(response.id.as_str())
                                 .map(String::as_str)
                                 .unwrap_or(response.id.as_str());
-                            let mut part = build_function_response_part(
+                            parts.push(json!(build_function_response_part(
                                 &response.id,
                                 name,
                                 format!("Error: {}", e),
                                 Vec::new(),
-                            );
-                            if include_signature {
-                                maybe_insert_signature_from_metadata(&mut part, &response.metadata);
-                            }
-                            parts.push(json!(part));
+                            )));
                         }
                     },
                     MessageContentBlock::Thinking(_) => {}
@@ -360,8 +348,10 @@ fn process_response_part_impl(
             let arguments = function_call
                 .get("args")
                 .map(|params| object(params.clone()));
-            let effective_signature = signature.or(last_signature.as_deref());
-            let metadata = effective_signature.map(metadata_with_signature);
+            // The signature belongs to the first function call only (or carries over from a
+            // preceding part); later parallel calls have none and must be sent back without one
+            let effective_signature = last_signature.take();
+            let metadata = effective_signature.as_deref().map(metadata_with_signature);
 
             Some(MessageContentBlock::tool_request_with_metadata(
                 id,
@@ -1402,8 +1392,8 @@ mod tests {
         assert_eq!(get_thought_signature(&req1.metadata), Some(SIG));
         assert_eq!(
             get_thought_signature(&req2.metadata),
-            Some(SIG),
-            "Should inherit"
+            None,
+            "Parallel calls after the first carry no signature"
         );
 
         let mut tool_response = Message::user();
@@ -1418,7 +1408,8 @@ mod tests {
             false,
         );
         assert_eq!(google_out[1]["parts"][0]["thoughtSignature"], SIG);
-        assert_eq!(google_out[2]["parts"][0]["thoughtSignature"], SIG);
+        assert!(google_out[1]["parts"][1].get("thoughtSignature").is_none());
+        assert!(google_out[2]["parts"][0].get("thoughtSignature").is_none());
 
         let second_assistant = response_to_message(google_response(vec![json!({
             "functionCall": {"name": "echo", "args": {}},
@@ -1430,7 +1421,9 @@ mod tests {
             false,
         );
         assert_eq!(google_multi[1]["parts"][0]["thoughtSignature"], SIG);
-        assert_eq!(google_multi[2]["parts"][0]["thoughtSignature"], SIG);
+        assert!(google_multi[2]["parts"][0]
+            .get("thoughtSignature")
+            .is_none());
         assert_eq!(google_multi[3]["parts"][0]["thoughtSignature"], "sig_456");
 
         let final_response_with_sig =
