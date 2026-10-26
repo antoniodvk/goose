@@ -1538,17 +1538,25 @@ impl GooseAcpAgent {
 
         cx.send_request(permission_request)
             .on_receiving_result(move |result| async move {
-                let permission = match result {
-                    Ok(response) => outcome_to_confirmation(&response.outcome).permission,
+                let (permission, decline_reason) = match result {
+                    Ok(response) => (
+                        outcome_to_confirmation(&response.outcome).permission,
+                        outcome_decline_reason(&response),
+                    ),
                     Err(e) => {
                         error!(error = ?e, "permission request failed");
-                        Permission::Cancel
+                        (Permission::Cancel, None)
                     }
                 };
 
                 if let Err(error) = target
                     .agent
-                    .submit_tool_confirmation(&target.session_id, &request_id, permission)
+                    .submit_tool_confirmation_with_reason(
+                        &target.session_id,
+                        &request_id,
+                        permission,
+                        decline_reason,
+                    )
                     .await
                 {
                     error!(
@@ -1609,6 +1617,23 @@ fn outcome_to_confirmation(outcome: &RequestPermissionOutcome) -> PermissionConf
         principal_type: PrincipalType::Tool,
         permission: Permission::from(PermissionDecision::from(outcome)),
     }
+}
+
+fn decline_reason_from_meta(meta: Option<&Meta>) -> Option<String> {
+    meta?
+        .get("goose")?
+        .get("declineReason")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn outcome_decline_reason(response: &RequestPermissionResponse) -> Option<String> {
+    let outcome_meta = match &response.outcome {
+        RequestPermissionOutcome::Selected(selected) => selected.meta.as_ref(),
+        _ => None,
+    };
+    decline_reason_from_meta(outcome_meta)
+        .or_else(|| decline_reason_from_meta(response.meta.as_ref()))
 }
 
 fn prompt_error_from_message_content(
