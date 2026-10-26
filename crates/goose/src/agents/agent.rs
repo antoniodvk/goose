@@ -466,6 +466,17 @@ impl Agent {
         request_id: &str,
         permission: Permission,
     ) -> Result<()> {
+        self.submit_tool_confirmation_with_reason(session_id, request_id, permission, None)
+            .await
+    }
+
+    pub async fn submit_tool_confirmation_with_reason(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        permission: Permission,
+        decline_reason: Option<String>,
+    ) -> Result<()> {
         self.config
             .session_manager
             .get_session(session_id, false)
@@ -516,6 +527,27 @@ impl Agent {
         }
 
         if state.contains_request(request_id) {
+            if matches!(
+                state_machine_permission,
+                Permission::DenyOnce | Permission::AlwaysDeny
+            ) {
+                if let Some(reason) = decline_reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    self.config
+                        .session_manager
+                        .update_tool_request_meta(
+                            session_id,
+                            request_id,
+                            serde_json::json!({
+                                crate::agents::tool_execution::TOOL_DECLINE_REASON_KEY: reason,
+                            }),
+                        )
+                        .await?;
+                }
+            }
             persist_tool_confirmation_decision(
                 self.config.session_manager.as_ref(),
                 session_id,
