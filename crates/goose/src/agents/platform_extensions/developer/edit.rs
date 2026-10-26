@@ -125,7 +125,14 @@ impl EditTools {
             }
         };
 
-        let new_content = match string_replace(&content, &params.before, &params.after) {
+        // Models send LF; match CRLF files (e.g. git autocrlf on Windows) in their own line endings.
+        let (before, after) = if content.contains("\r\n") && !params.before.contains("\r\n") {
+            (to_crlf(&params.before), to_crlf(&params.after))
+        } else {
+            (params.before.clone(), params.after.clone())
+        };
+
+        let new_content = match string_replace(&content, &before, &after) {
             Ok(c) => c,
             Err(msg) => {
                 return CallToolResult::error(vec![visible_text(msg)]);
@@ -152,6 +159,10 @@ impl Default for EditTools {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn to_crlf(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
 pub fn string_replace(content: &str, before: &str, after: &str) -> Result<String, String> {
@@ -412,6 +423,23 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("println!(\"world\");"));
         assert!(!content.contains("println!(\"hello\");"));
+    }
+
+    #[test]
+    fn test_file_edit_multiline_in_crlf_file() {
+        let dir = setup();
+        let path = dir.path().join("edit.txt");
+        fs::write(&path, "a\r\nb\r\nc\r\n").unwrap();
+        let tools = EditTools::new();
+
+        let result = tools.file_edit(FileEditParams {
+            path: path.to_string_lossy().to_string(),
+            before: "a\nb".to_string(),
+            after: "x\ny".to_string(),
+        });
+
+        assert!(!result.is_error.unwrap_or(false));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "x\r\ny\r\nc\r\n");
     }
 
     #[test]
