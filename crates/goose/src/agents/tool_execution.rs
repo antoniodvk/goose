@@ -155,22 +155,35 @@ pub const DECLINED_RESPONSE: &str = "The user has declined to run this tool. \
 /// Tool meta key holding the reason a security inspector blocked the call.
 pub const TOOL_BLOCKED_REASON_KEY: &str = "goose.blocked_reason";
 
+/// Tool meta key holding the reason the client (app) declined the call on its own.
+pub const TOOL_DECLINE_REASON_KEY: &str = "goose.decline_reason";
+
 /// Response for a declined tool call: the security block reason when an inspector
-/// blocked it, otherwise the user's decline.
+/// blocked it, the client decline reason when the app declined it automatically,
+/// otherwise the user's decline.
 pub fn declined_response(request: &ToolRequest) -> String {
-    let reason = request
-        .tool_meta
-        .as_ref()
+    let meta = request.tool_meta.as_ref();
+    if let Some(reason) = meta
         .and_then(|meta| meta.get(TOOL_BLOCKED_REASON_KEY))
-        .and_then(|value| value.as_str());
-    match reason {
-        Some(reason) => format!(
+        .and_then(|value| value.as_str())
+    {
+        return format!(
             "Blocked by the security check, not declined by the user. Reason: {reason}\n\
              DO NOT attempt this tool call again or work around the block. \
              Tell the user what was blocked and why, then STOP."
-        ),
-        None => DECLINED_RESPONSE.to_string(),
+        );
     }
+    if let Some(reason) = meta
+        .and_then(|meta| meta.get(TOOL_DECLINE_REASON_KEY))
+        .and_then(|value| value.as_str())
+    {
+        return format!(
+            "{reason}\n\
+             DO NOT attempt to call this tool again. \
+             If there are no alternative methods to proceed, clearly explain the situation and STOP."
+        );
+    }
+    DECLINED_RESPONSE.to_string()
 }
 
 pub const CHAT_MODE_TOOL_SKIPPED_RESPONSE: &str = "Let the user know the tool call was skipped in goose chat mode. \
