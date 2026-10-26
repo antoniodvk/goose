@@ -94,19 +94,12 @@ libc = { version = "0.2.182", default-features = false, features = ["std"] }
 default = [
     "code-mode",
     "tree-sitter",
-    "local-inference",
-    "aws-providers",
-    "telemetry",
-    "otel",
     "rustls-tls",
-    "live-voice",
     "system-keyring",
-    "update",
     "bundled-mcp",
     "scheduler",
     "platform-apps",
     "chat-recall",
-    "acp-http",
     "online-model-meta",
 ]
 online-model-meta = ["goose/online-model-meta"]
