@@ -9,7 +9,7 @@ use crate::agents::mcp_client::{Error, McpClientTrait};
 use crate::agents::ToolCallContext;
 use anyhow::Result;
 use async_trait::async_trait;
-use edit::{EditTools, FileEditParams, FileWriteParams};
+use edit::{EditTools, FileEditParams, FileReadParams, FileWriteParams};
 use image::{ImageReadParams, ImageTool};
 use indoc::indoc;
 use rmcp::model::{
@@ -51,8 +51,9 @@ fn developer_instructions() -> &'static str {
 
             For editing software, prefer the flow of using tree to understand the codebase structure
             and file sizes. When you need to search, prefer findstr or Select-String (via shell).
-            Then use type or Get-Content to gather the context you need, always reading before
-            editing. Use write and edit to efficiently make changes. Test and verify as appropriate.
+            Then use read (with line and limit for large files) to gather the context you need,
+            always reading before editing. Use write and edit to efficiently make changes. Test
+            and verify as appropriate.
         "}
     } else {
         indoc! {"
@@ -65,7 +66,8 @@ fn developer_instructions() -> &'static str {
 
             For editing software, prefer the flow of using tree to understand the codebase structure
             and file sizes. When you need to search, prefer rg which correctly respects gitignored
-            content. Then use cat or sed to gather the context you need, always reading before editing.
+            content. Then use read (with line and limit for large files) to gather the context you
+            need, always reading before editing.
             Use write and edit to efficiently make changes. Test and verify as appropriate.
 
             When running Python scripts or commands, always use `python3` instead of `python`.
@@ -107,6 +109,18 @@ impl DeveloperClient {
 
     pub(crate) fn get_tools() -> Vec<Tool> {
         vec![
+            Tool::new(
+                "read".to_string(),
+                "Read a text file from disk. Use line and limit to read part of a large file; output is limited to 30,000 bytes.".to_string(),
+                Self::schema::<FileReadParams>(),
+            )
+            .annotate(ToolAnnotations::from_raw(
+                Some("Read".to_string()),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+            )),
             Tool::new(
                 "write".to_string(),
                 "Create a new file or overwrite an existing file. Creates parent directories if needed.".to_string(),
@@ -223,6 +237,12 @@ impl McpClientTrait for DeveloperClient {
                     .await),
                 Err(error) => Ok(ShellTool::error_result(&format!("Error: {error}"), None)),
             },
+            "read" => match Self::parse_args::<FileReadParams>(arguments) {
+                Ok(params) => Ok(self.edit_tools.file_read_with_cwd(params, working_dir)),
+                Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
+                    "Error: {error}"
+                ))])),
+            },
             "write" => match Self::parse_args::<FileWriteParams>(arguments) {
                 Ok(params) => Ok(self.edit_tools.file_write_with_cwd(params, working_dir)),
                 Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
@@ -275,7 +295,10 @@ mod tests {
             .map(|t| t.name.to_string())
             .collect();
 
-        assert_eq!(names, vec!["write", "edit", "shell", "tree", "read_image"]);
+        assert_eq!(
+            names,
+            vec!["read", "write", "edit", "shell", "tree", "read_image"]
+        );
     }
 
     #[test]

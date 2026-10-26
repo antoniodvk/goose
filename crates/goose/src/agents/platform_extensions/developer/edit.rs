@@ -5,6 +5,8 @@ use rmcp::model::{Annotations, CallToolResult, ContentBlock, TextContent};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use super::shell::OUTPUT_LIMIT_BYTES;
+
 const NO_MATCH_PREVIEW_LINES: usize = 20;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -53,8 +55,14 @@ impl EditTools {
 
         match fs::read_to_string(&path) {
             Ok(content) => {
+                let total_lines = content.lines().count();
                 let content = apply_line_limit(&content, params.line, params.limit);
-                CallToolResult::success(vec![visible_text(content)])
+                let start_line = params.line.unwrap_or(1) as usize;
+                CallToolResult::success(vec![visible_text(cap_read_output(
+                    content,
+                    start_line,
+                    total_lines,
+                ))])
             }
             Err(error) => CallToolResult::error(vec![visible_text(format!(
                 "Failed to read {}: {}",
@@ -125,14 +133,7 @@ impl EditTools {
             }
         };
 
-        // Models send LF; match CRLF files (e.g. git autocrlf on Windows) in their own line endings.
-        let (before, after) = if content.contains("\r\n") && !params.before.contains("\r\n") {
-            (to_crlf(&params.before), to_crlf(&params.after))
-        } else {
-            (params.before.clone(), params.after.clone())
-        };
-
-        let new_content = match string_replace(&content, &before, &after) {
+        let new_content = match string_replace(&content, &params.before, &params.after) {
             Ok(c) => c,
             Err(msg) => {
                 return CallToolResult::error(vec![visible_text(msg)]);
@@ -166,6 +167,13 @@ fn to_crlf(text: &str) -> String {
 }
 
 pub fn string_replace(content: &str, before: &str, after: &str) -> Result<String, String> {
+    // Models send LF; match CRLF files (e.g. git autocrlf on Windows) in their own line endings.
+    let (before, after) = if content.contains("\r\n") && !before.contains("\r\n") {
+        (to_crlf(before), to_crlf(after))
+    } else {
+        (before.to_string(), after.to_string())
+    };
+    let (before, after) = (before.as_str(), after.as_str());
     let matches: Vec<_> = content.match_indices(before).collect();
 
     match matches.len() {
@@ -204,6 +212,28 @@ pub fn string_replace(content: &str, before: &str, after: &str) -> Result<String
             Err(msg)
         }
     }
+}
+
+fn cap_read_output(content: String, start_line: usize, total_lines: usize) -> String {
+    if content.len() <= OUTPUT_LIMIT_BYTES {
+        return content;
+    }
+    let mut cut = OUTPUT_LIMIT_BYTES;
+    while !content.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let cut = content[..cut].rfind('\n').map(|i| i + 1).unwrap_or(cut);
+    let shown = content[..cut].lines().count();
+    let last_line = start_line + shown.saturating_sub(1);
+    format!(
+        "{}\n[Output limited to {} bytes: lines {}-{} of {}. Read more with line={} and limit.]",
+        &content[..cut],
+        OUTPUT_LIMIT_BYTES,
+        start_line,
+        last_line,
+        total_lines,
+        last_line + 1
+    )
 }
 
 fn apply_line_limit(content: &str, line: Option<u32>, limit: Option<u32>) -> String {
@@ -423,6 +453,29 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("println!(\"world\");"));
         assert!(!content.contains("println!(\"hello\");"));
+    }
+
+    #[test]
+    fn test_file_read_caps_large_output() {
+        let dir = setup();
+        let path = dir.path().join("big.txt");
+        let line = "x".repeat(99);
+        fs::write(&path, format!("{line}\n").repeat(1000)).unwrap();
+        let tools = EditTools::new();
+
+        let result = tools.file_read_with_cwd(
+            FileReadParams {
+                path: path.to_string_lossy().to_string(),
+                line: None,
+                limit: None,
+            },
+            None,
+        );
+
+        let text = extract_text(&result);
+        assert!(text.len() < OUTPUT_LIMIT_BYTES + 200);
+        assert!(text.contains("lines 1-300 of 1000"));
+        assert!(text.contains("line=301"));
     }
 
     #[test]
