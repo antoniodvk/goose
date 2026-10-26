@@ -306,6 +306,11 @@ name = "test_whisper"
 path = "examples/test_whisper.rs"
 required-features = ["local-inference"]
 
+[[test]]
+name = "acp_transport_auth_test"
+path = "tests/acp_transport_auth_test.rs"
+required-features = ["acp-http"]
+
 [[bin]]
 name = "goose-acp"
 path = "src/bin/goose-acp.rs"
