@@ -143,9 +143,18 @@ impl EditTools {
             Ok(()) => {
                 let old_lines = params.before.lines().count();
                 let new_lines = params.after.lines().count();
+                let before = if content.contains("\r\n") && !params.before.contains("\r\n") {
+                    to_crlf(&params.before)
+                } else {
+                    params.before.clone()
+                };
+                let start_line = content
+                    .find(&before)
+                    .map(|pos| count_lines_before(&content, pos))
+                    .unwrap_or(1);
                 CallToolResult::success(vec![visible_text(format!(
-                    "Edited {} ({} lines -> {} lines)",
-                    params.path, old_lines, new_lines
+                    "Edited {} ({} lines -> {} lines) at line {}",
+                    params.path, old_lines, new_lines, start_line
                 ))])
             }
             Err(error) => CallToolResult::error(vec![visible_text(format!(
@@ -464,6 +473,7 @@ mod tests {
         });
 
         assert!(!result.is_error.unwrap_or(false));
+        assert!(extract_text(&result).ends_with("(1 lines -> 1 lines) at line 2"));
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("println!(\"world\");"));
         assert!(!content.contains("println!(\"hello\");"));
