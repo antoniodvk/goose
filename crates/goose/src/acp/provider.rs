@@ -2771,6 +2771,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_reports_context_used_instead_of_summed_total() {
+        use futures::StreamExt;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let (provider, model) = test_provider_with_tx(Some(tx));
+        provider.context_used.store(999, Ordering::Relaxed);
+
+        let messages = vec![Message::user().with_text("hi")];
+        let mut stream = provider.stream(&model, "", &messages, &[]).await.unwrap();
+        let response_tx = match rx.recv().await.expect("expected ACP prompt request") {
+            ClientRequest::Prompt { response_tx, .. } => response_tx,
+            _ => panic!("expected ACP prompt request"),
+        };
+        // A value from an earlier prompt must not leak into this one.
+        assert_eq!(provider.context_used.load(Ordering::Relaxed), 0);
+
+        provider.context_used.store(120_000, Ordering::Relaxed);
+        response_tx
+            .send(AcpUpdate::Complete(
+                StopReason::EndTurn,
+                Some(AcpUsage::new(1_584_659, 1_580_000, 4_659)),
+            ))
+            .await
+            .unwrap();
+
+        let mut totals = Vec::new();
+        while let Some(item) = stream.next().await {
+            if let (_, Some(usage)) = item.unwrap() {
+                totals.push(usage.usage.total_tokens);
+            }
+        }
+        assert_eq!(totals, vec![Some(120_000)]);
+    }
+
+    #[tokio::test]
     async fn chat_mode_denied_tool_messages_get_distinct_provider_ids() {
         use futures::StreamExt;
 
