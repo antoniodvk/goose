@@ -450,10 +450,13 @@ fn discover_skills_with_config(working_dir: Option<&Path>, config: &Config) -> V
         });
     let mut sources = goose_agent::skills::discover_skills(roots);
     let mut seen: HashSet<_> = sources.iter().map(|source| source.name.clone()).collect();
+    let disabled_builtins: Vec<String> = config
+        .get_param("GOOSE_DISABLED_BUILTIN_SKILLS")
+        .unwrap_or_default();
 
     for content in builtin::get_all() {
         if let Some(source) = parse_skill_content(content, &PathBuf::new(), true, true) {
-            if !seen.contains(&source.name) {
+            if !seen.contains(&source.name) && !disabled_builtins.contains(&source.name) {
                 seen.insert(source.name.clone());
                 let path = format!("builtin://skills/{}", source.name);
                 sources.push(SourceEntry {
