@@ -713,18 +713,13 @@ async fn collect_tagged_lines(
     Ok(())
 }
 
-/// Build a human-readable truncation notice with platform-appropriate commands.
+/// Build a human-readable truncation notice pointing to the `read` tool.
 fn truncation_notice(info: &TruncationInfo) -> String {
     let path = info.path.display();
-    let commands = if cfg!(windows) {
-        "PowerShell commands like `Get-Content -TotalCount 200`, `Select-String`, or \
-         `Get-Content | Select-Object -Skip 100 -First 100`"
-    } else {
-        "shell commands like `head`, `tail`, or `sed -n '100,200p'`"
-    };
     format!(
         "[{reason} Full output saved to {path}. \
-         Read it with {commands} up to {limit} lines at a time.]",
+         Read it with the `read` tool using `line` and `limit`, \
+         up to {limit} lines at a time.]",
         reason = info.reason,
         limit = OUTPUT_LIMIT_LINES,
     )
@@ -1088,6 +1083,7 @@ mod tests {
 
         let notice = truncation_notice(info);
         assert!(notice.contains("Full output saved to"));
+        assert!(notice.contains("`read` tool"));
     }
 
     #[test]
