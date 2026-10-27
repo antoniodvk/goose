@@ -1203,11 +1203,20 @@ impl SummonClient {
             return Err("Agent source has no path".to_string());
         }
 
-        let model = source
-            .properties
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+        // A configured GOOSE_SUBAGENT_MODEL (env or config) wins over the agent file's model:
+        // Claude Code agent files name Claude aliases (sonnet, opus, haiku) that other providers don't know.
+        let model = if Config::global()
+            .get_param::<String>("GOOSE_SUBAGENT_MODEL")
+            .is_ok()
+        {
+            None
+        } else {
+            source
+                .properties
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
 
         let settings = model.map(|m| Settings {
             goose_model: Some(m),
@@ -2626,6 +2635,28 @@ You review code."#;
         assert_eq!(resolved.model_name, OVERRIDE_MODEL);
         assert_eq!(resolved.max_tokens, overridden.max_tokens);
         assert_eq!(resolved.reasoning, overridden.reasoning);
+    }
+
+    #[test]
+    #[serial]
+    fn test_subagent_model_env_overrides_agent_file_model() {
+        let _env = env_lock::lock_env([("GOOSE_SUBAGENT_MODEL", Some(OVERRIDE_MODEL))]);
+        let client = SummonClient::new(create_test_context()).unwrap();
+        let source = parse_agent_content(
+            "---\nname: reviewer\nmodel: sonnet\n---\nYou review code.",
+            Path::new("reviewer.md"),
+        )
+        .unwrap();
+
+        let recipe = client
+            .build_recipe_from_agent(&source, &DelegateParams::default())
+            .unwrap();
+
+        assert!(recipe
+            .settings
+            .as_ref()
+            .and_then(|s| s.goose_model.as_ref())
+            .is_none());
     }
 
     #[tokio::test]
