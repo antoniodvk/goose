@@ -37,6 +37,20 @@ unsafe fn run_helper() {
     }
 
     std::fs::write("parent.pid", std::process::id().to_string()).unwrap();
+    // Windows children inherit every inheritable handle, not just their stdio,
+    // so the leaf would keep the shell's output pipes open despite Stdio::null.
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use winapi::um::handleapi::SetHandleInformation;
+        use winapi::um::winbase::HANDLE_FLAG_INHERIT;
+        for handle in [
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ] {
+            unsafe { SetHandleInformation(handle as _, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
     let mut leaf = Command::new(std::env::current_exe().unwrap())
         .args([HELPER_ARG, "leaf"])
         .stdin(Stdio::null())
