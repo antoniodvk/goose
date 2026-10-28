@@ -912,10 +912,14 @@ impl GooseAcpAgent {
                 .provider(session_id)
                 .await
                 .internal_err_ctx("Failed to resolve session provider")?;
-            let context_limit =
-                crate::context_limit::get_context_limit(provider.as_ref(), &model_name)
-                    .await
-                    .internal_err_ctx("Failed to resolve context limit")?;
+            let context_limit = crate::context_limit::get_reported_context_limit(
+                &self.session_manager,
+                &session,
+                provider.as_ref(),
+                &model_name,
+            )
+            .await
+            .internal_err_ctx("Failed to resolve context limit")?;
             let session = self
                 .session_manager
                 .get_session(session_id, false)
@@ -2168,6 +2172,7 @@ impl GooseAcpAgent {
     }
 
     async fn resolve_context_limit(
+        &self,
         session: &Session,
         agent: &Arc<Agent>,
     ) -> Result<usize, agent_client_protocol::Error> {
@@ -2178,13 +2183,19 @@ impl GooseAcpAgent {
         let model = session.model_config.as_ref().ok_or_else(|| {
             agent_client_protocol::Error::internal_error().data("Session has no model")
         })?;
-        crate::context_limit::get_context_limit(provider.as_ref(), &model.model_name)
-            .await
-            .internal_err_ctx("Failed to resolve context limit")
+        crate::context_limit::get_reported_context_limit(
+            &self.session_manager,
+            session,
+            provider.as_ref(),
+            &model.model_name,
+        )
+        .await
+        .internal_err_ctx("Failed to resolve context limit")
     }
 
     /// Updates sent during one turn share `cached_context_limit`, so the provider
-    /// limit is resolved once per turn rather than on every usage event.
+    /// limit is resolved once per turn rather than on every usage event. Only a
+    /// known size is cached; an unknown one (`0`) is resolved again next time.
     async fn send_session_usage_updates(
         &self,
         cx: &ConnectionTo<Client>,
@@ -2206,8 +2217,10 @@ impl GooseAcpAgent {
         let context_limit = match *cached_context_limit {
             Some(limit) => limit,
             None => {
-                let limit = Self::resolve_context_limit(&session, agent).await?;
-                *cached_context_limit = Some(limit);
+                let limit = self.resolve_context_limit(&session, agent).await?;
+                if limit > 0 {
+                    *cached_context_limit = Some(limit);
+                }
                 limit
             }
         };
@@ -3844,6 +3857,25 @@ print(\"hello, world\")
         assert_eq!(usage.context_limit, 258_000);
         assert_eq!(updates.standard.used, 0);
         assert_eq!(updates.standard.size, 258_000);
+    }
+
+    #[test]
+    fn test_build_usage_update_reports_zero_for_unknown_context_limit() {
+        let session = make_session_with_usage(
+            TokenUsage::new(Some(0), Some(0), Some(1_000)),
+            TokenUsage::default(),
+        );
+        let totals = SessionUsageTotals {
+            accumulated_usage: session.accumulated_usage,
+            accumulated_cost: session.accumulated_cost,
+        };
+        let updates = build_usage_updates(&session, &totals, 0);
+        let usage = match updates.custom.update {
+            GooseSessionUpdate::UsageUpdate(usage) => usage,
+            other => panic!("expected usage update, got {other:?}"),
+        };
+        assert_eq!(usage.context_limit, 0);
+        assert_eq!(updates.standard.size, 0);
     }
 
     #[test]

@@ -409,7 +409,7 @@ fn model_info_for_deployment(deployment_name: &str, model_name: &str) -> ModelIn
     ModelInfo {
         name: deployment_name.to_string(),
         resolved_model: Some(model_name.to_string()),
-        context_limit: canonical.as_ref().map(|model| model.limit.context),
+        context_limit: canonical.as_ref().and_then(|model| model.limit.context),
         input_token_cost: None,
         output_token_cost: None,
         cache_read_token_cost: None,
@@ -541,9 +541,13 @@ impl Provider for AzureFoundryProvider {
         Ok(model_info_for_deployment(model_name, &resolved_model))
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         goose_provider_types::context_limit::ContextLimitResolver::new(self.get_name())
-            .resolve(model, override_limit, || async {
+            .resolve_known(model, override_limit, || async {
                 self.fetch_model_info(model)
                     .await
                     .map(|info| info.context_limit)

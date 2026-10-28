@@ -522,7 +522,11 @@ impl Provider for OllamaProvider {
         stream_ollama(response, self.options.chunk_timeout_secs, log)
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         let configured_limits = self
             .custom_models
             .iter()
@@ -530,7 +534,7 @@ impl Provider for OllamaProvider {
             .filter_map(|model| model.context_limit.map(|limit| (model.name.clone(), limit)));
         crate::context_limit::ContextLimitResolver::new(&self.name)
             .with_configured_limits(configured_limits)
-            .resolve(model, override_limit, || async {
+            .resolve_known(model, override_limit, || async {
                 Ok(self.options.input_limit)
             })
             .await

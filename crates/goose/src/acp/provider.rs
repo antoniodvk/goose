@@ -546,6 +546,8 @@ impl AcpProvider {
 
         self.send_set_config_option("", config_id, model_name.to_string())
             .await?;
+        // The size belongs to the previous model until the agent reports the new one.
+        self.context_size.store(0, Ordering::Relaxed);
 
         let mut applied = self
             .applied_model
@@ -733,9 +735,13 @@ impl Provider for AcpProvider {
         Ok(())
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         goose_providers::context_limit::ContextLimitResolver::new(self.get_name())
-            .resolve(model, override_limit, || async {
+            .resolve_known(model, override_limit, || async {
                 let size = self.context_size.load(Ordering::Relaxed);
                 Ok((size > 0).then_some(size as usize))
             })
@@ -2995,11 +3001,23 @@ mod tests {
     async fn get_context_limit_surfaces_captured_context_size() {
         let (provider, model) = test_provider();
         assert_eq!(
+            provider
+                .get_known_context_limit(&model.model_name, None)
+                .await,
+            None
+        );
+        assert_eq!(
             provider.get_context_limit(&model.model_name, None).await,
             goose_providers::model::DEFAULT_CONTEXT_LIMIT
         );
 
         provider.context_size.store(200_000, Ordering::Relaxed);
+        assert_eq!(
+            provider
+                .get_known_context_limit(&model.model_name, None)
+                .await,
+            Some(200_000)
+        );
         assert_eq!(
             provider.get_context_limit(&model.model_name, None).await,
             200_000
@@ -3448,6 +3466,8 @@ mod tests {
     async fn apply_model_if_changed_sends_set_config_option_on_change() {
         let (tx, mut rx) = mpsc::channel(1);
         let provider = test_provider_with_model_option(tx, Some("old-model".to_string()));
+        provider.context_size.store(200_000, Ordering::Relaxed);
+        let context_size = provider.context_size.clone();
 
         let handle =
             tokio::spawn(async move { provider.apply_model_if_changed("new-model").await });
@@ -3467,6 +3487,11 @@ mod tests {
         }
 
         handle.await.unwrap().unwrap();
+        assert_eq!(
+            context_size.load(Ordering::Relaxed),
+            0,
+            "the previous model's window size must not outlive the switch"
+        );
     }
 
     #[tokio::test]

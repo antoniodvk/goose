@@ -1214,7 +1214,10 @@ impl GooseAcpAgent {
                     CanonicalModelInfoDto {
                         provider: req.provider.clone(),
                         model: req.model.clone(),
-                        context_limit: canonical_model.limit.context,
+                        context_limit: canonical_model
+                            .limit
+                            .context
+                            .unwrap_or_else(|| ModelConfig::new(&req.model).context_limit()),
                         max_output_tokens: canonical_model.limit.output,
                         reasoning: canonical_model
                             .reasoning

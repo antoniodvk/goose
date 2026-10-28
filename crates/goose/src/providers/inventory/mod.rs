@@ -1196,7 +1196,7 @@ fn enriched_model(
         family: canonical.as_ref().and_then(|model| model.family.clone()),
         context_limit: canonical
             .as_ref()
-            .map(|model| model.limit.context)
+            .and_then(|model| model.limit.context)
             .or(fallback_context_limit),
         reasoning: canonical.as_ref().and_then(|model| model.reasoning),
         recommended: false,

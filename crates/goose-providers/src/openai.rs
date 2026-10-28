@@ -755,7 +755,11 @@ impl Provider for OpenAiProvider {
         self.skip_canonical_filtering
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         let configured_limits = self
             .custom_models
             .iter()
@@ -765,7 +769,7 @@ impl Provider for OpenAiProvider {
             .with_configured_limits(configured_limits);
 
         resolver
-            .resolve(model, override_limit, || async {
+            .resolve_known(model, override_limit, || async {
                 if let Some(cached) = self
                     .n_ctx_cache
                     .lock()

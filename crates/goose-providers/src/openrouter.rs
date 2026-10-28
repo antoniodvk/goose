@@ -562,15 +562,20 @@ impl Provider for OpenRouterProvider {
         true
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         crate::context_limit::ContextLimitResolver::new(&self.name)
-            .resolve(model, override_limit, || async {
+            .resolve_known(model, override_limit, || async {
                 // The catalog outranks the reported length, so a model it knows
                 // never needs the model list.
-                if let Some(canonical) =
+                if let Some(context) =
                     crate::canonical::maybe_get_canonical_model(&self.name, model)
+                        .and_then(|canonical| canonical.limit.context)
                 {
-                    return Ok(Some(canonical.limit.context));
+                    return Ok(Some(context));
                 }
                 Ok(self
                     .get_or_fetch_models()
@@ -740,7 +745,7 @@ mod tests {
                 "{} must support text input",
                 model.name
             );
-            assert!(canonical.limit.context > 0);
+            assert!(canonical.limit.context.unwrap_or(0) > 0);
         }
     }
 
@@ -943,7 +948,9 @@ mod tests {
             64_000
         );
         assert_eq!(
-            provider.get_context_limit(MODEL_IN_CATALOG, None).await,
+            provider
+                .get_known_context_limit(MODEL_IN_CATALOG, None)
+                .await,
             catalog_limit
         );
     }

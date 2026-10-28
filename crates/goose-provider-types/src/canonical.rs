@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(canonical.cost.input, None);
         assert_eq!(canonical.cost.output, None);
         assert!(
-            canonical.limit.context > 0,
+            canonical.limit.context.unwrap_or(0) > 0,
             "context limit should be preserved"
         );
     }
@@ -232,7 +232,7 @@ mod tests {
     fn azure_foundry_models_use_inferred_provider_pricing() {
         let canonical = maybe_get_canonical_model("azure_foundry", "gpt-5")
             .expect("gpt-5 should resolve through the Azure catalog");
-        assert_eq!(canonical.limit.context, 400_000);
+        assert_eq!(canonical.limit.context, Some(400_000));
         let openai = maybe_get_canonical_model("openai", "gpt-5")
             .expect("gpt-5 should resolve for its first-party provider");
         assert_eq!(canonical.cost.input, openai.cost.input);
@@ -250,7 +250,7 @@ mod tests {
             .expect("llama-3.3-70b-instruct should resolve");
         assert_eq!(canonical.cost.input, Some(0.71));
         assert_eq!(canonical.cost.output, Some(0.71));
-        assert!(canonical.limit.context > 0);
+        assert!(canonical.limit.context.unwrap_or(0) > 0);
     }
 
     #[test]
@@ -261,7 +261,7 @@ mod tests {
             .expect("llama-3.3-70b-instruct should resolve");
         assert_eq!(canonical.cost.input, None);
         assert_eq!(canonical.cost.output, None);
-        assert!(canonical.limit.context > 0);
+        assert!(canonical.limit.context.unwrap_or(0) > 0);
     }
 
     #[test]
@@ -276,7 +276,7 @@ mod tests {
     fn anthropic_opus_5_resolves() {
         let canonical = maybe_get_canonical_model("anthropic", "claude-opus-5")
             .expect("claude-opus-5 should resolve");
-        assert_eq!(canonical.limit.context, 1_000_000);
+        assert_eq!(canonical.limit.context, Some(1_000_000));
         assert_eq!(canonical.limit.output, Some(128_000));
         assert!(canonical.cost.input.is_some());
         assert!(canonical.cost.output.is_some());
@@ -287,7 +287,7 @@ mod tests {
         let canonical = maybe_get_canonical_model("anthropic", "claude-opus-5-5")
             .expect("claude-opus-5-5 should resolve");
         assert_eq!(canonical.id, "anthropic/claude-opus-5.5");
-        assert_eq!(canonical.limit.context, 1_000_000);
+        assert_eq!(canonical.limit.context, Some(1_000_000));
         assert_eq!(canonical.limit.output, Some(128_000));
         assert_eq!(
             canonical.thinking_mode,
@@ -302,7 +302,7 @@ mod tests {
         for (model, input_cost) in [("gpt-6-sol", 2.0), ("gpt-6-luna", 0.1)] {
             let canonical = maybe_get_canonical_model("openai", model)
                 .unwrap_or_else(|| panic!("{model} should resolve"));
-            assert_eq!(canonical.limit.context, 1_050_000);
+            assert_eq!(canonical.limit.context, Some(1_050_000));
             assert_eq!(canonical.limit.output, Some(128_000));
             assert_eq!(canonical.cost.input, Some(input_cost));
             assert!(canonical.tool_call);
@@ -313,7 +313,7 @@ mod tests {
     fn kimi_code_k3_resolves_with_reasoning_and_context_limit() {
         let canonical = maybe_get_canonical_model("kimi_code", "k3")
             .expect("kimi_code/k3 should resolve via kimi-code-plan-cn provider mapping");
-        assert_eq!(canonical.limit.context, 1_048_576);
+        assert_eq!(canonical.limit.context, Some(1_048_576));
         assert_eq!(canonical.reasoning, Some(true));
         assert_eq!(canonical.temperature, Some(false));
     }

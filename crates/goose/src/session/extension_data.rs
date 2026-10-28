@@ -98,6 +98,19 @@ impl TodoState {
     }
 }
 
+/// Last context window size seen for a session, tied to the model it belongs to.
+/// Lets a reloaded session report the real size before the provider can.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextWindowState {
+    pub model: String,
+    pub size: usize,
+}
+
+impl ExtensionState for ContextWindowState {
+    const EXTENSION_NAME: &'static str = "context_window";
+    const VERSION: &'static str = "v0";
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GoalState {
     pub goal: Option<String>,

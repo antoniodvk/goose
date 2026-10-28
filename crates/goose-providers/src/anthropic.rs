@@ -382,7 +382,11 @@ impl Provider for AnthropicProvider {
         self.skip_canonical_filtering
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         let configured_limits = self
             .custom_models
             .iter()
@@ -390,7 +394,7 @@ impl Provider for AnthropicProvider {
             .filter_map(|model| model.context_limit.map(|limit| (model.name.clone(), limit)));
         crate::context_limit::ContextLimitResolver::new(&self.name)
             .with_configured_limits(configured_limits)
-            .resolve(model, override_limit, || async { Ok(None) })
+            .resolve_known(model, override_limit, || async { Ok(None) })
             .await
     }
 

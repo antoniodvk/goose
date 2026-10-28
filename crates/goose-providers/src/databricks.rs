@@ -506,7 +506,7 @@ impl DatabricksProvider {
         let context_model = info.upstream_model_name.as_deref().unwrap_or(&info.name);
         let context_limit =
             crate::canonical::maybe_get_canonical_model(DATABRICKS_PROVIDER_NAME, context_model)
-                .map(|model| model.limit.context);
+                .and_then(|model| model.limit.context);
         let reasoning = info
             .reasoning
             .unwrap_or_else(|| ModelConfig::new(context_model).is_reasoning_model());
@@ -574,9 +574,13 @@ impl Provider for DatabricksProvider {
         self.retry_config.clone()
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         crate::context_limit::ContextLimitResolver::new(self.get_name())
-            .resolve(model, override_limit, || async {
+            .resolve_known(model, override_limit, || async {
                 self.fetch_model_info(model)
                     .await
                     .map(|info| info.context_limit)

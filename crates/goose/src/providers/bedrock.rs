@@ -943,7 +943,11 @@ impl Provider for BedrockProvider {
         self.retry_config.clone()
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         let configured_limits = BEDROCK_MODEL_TABLE.iter().filter_map(|entry| {
             entry
                 .context_limit
@@ -951,7 +955,7 @@ impl Provider for BedrockProvider {
         });
         goose_providers::context_limit::ContextLimitResolver::new(&self.name)
             .with_configured_limits(configured_limits)
-            .resolve(model, override_limit, || async { Ok(None) })
+            .resolve_known(model, override_limit, || async { Ok(None) })
             .await
     }
 
