@@ -126,7 +126,8 @@ impl Pricing {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Limit {
     /// Maximum context window size in tokens
-    pub context: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<usize>,
 
     /// Maximum output/completion tokens
     #[serde(skip_serializing_if = "Option::is_none")]

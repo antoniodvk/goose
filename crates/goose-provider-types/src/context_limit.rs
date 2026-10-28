@@ -41,13 +41,20 @@ impl ContextLimitResolver {
         })
     }
 
-    pub fn resolve_local(&self, model: &str, override_limit: Option<usize>) -> usize {
+    fn canonical_limit(&self, model: &str) -> Option<usize> {
+        maybe_get_canonical_model(&self.provider_name, model)
+            .and_then(|canonical| canonical.limit.context)
+    }
+
+    /// Known limit from override, configuration or catalog; `None` when nothing knows it.
+    pub fn resolve_local_known(&self, model: &str, override_limit: Option<usize>) -> Option<usize> {
         override_limit
             .or_else(|| self.configured_limit(model))
-            .or_else(|| {
-                maybe_get_canonical_model(&self.provider_name, model)
-                    .map(|canonical| canonical.limit.context)
-            })
+            .or_else(|| self.canonical_limit(model))
+    }
+
+    pub fn resolve_local(&self, model: &str, override_limit: Option<usize>) -> usize {
+        self.resolve_local_known(model, override_limit)
             .unwrap_or(DEFAULT_CONTEXT_LIMIT)
     }
 
@@ -61,16 +68,32 @@ impl ContextLimitResolver {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Option<usize>, ProviderError>>,
     {
+        self.resolve_known(model, override_limit, discover)
+            .await
+            .unwrap_or(DEFAULT_CONTEXT_LIMIT)
+    }
+
+    /// Like `resolve`, but `None` instead of the default when the limit is unknown.
+    pub async fn resolve_known<F, Fut>(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+        discover: F,
+    ) -> Option<usize>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Option<usize>, ProviderError>>,
+    {
         if let Some(limit) = override_limit {
-            return limit;
+            return Some(limit);
         }
 
         if let Some(limit) = self.configured_limit(model) {
-            return limit;
+            return Some(limit);
         }
 
         match discover().await {
-            Ok(Some(limit)) if limit > 0 => return limit,
+            Ok(Some(limit)) if limit > 0 => return Some(limit),
             Ok(Some(_) | None) => {}
             Err(error) => tracing::warn!(
                 provider = self.provider_name,
@@ -80,9 +103,7 @@ impl ContextLimitResolver {
             ),
         }
 
-        maybe_get_canonical_model(&self.provider_name, model)
-            .map(|canonical| canonical.limit.context)
-            .unwrap_or(DEFAULT_CONTEXT_LIMIT)
+        self.canonical_limit(model)
     }
 }
 
@@ -155,6 +176,23 @@ mod tests {
         assert_eq!(
             resolver.resolve_local("unknown", None),
             DEFAULT_CONTEXT_LIMIT
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_limit_stays_unknown() {
+        let resolver = ContextLimitResolver::new("unknown-provider");
+
+        assert_eq!(resolver.resolve_local_known("unknown-model", None), None);
+        assert_eq!(
+            resolver
+                .resolve_known("unknown-model", None, || async { Ok(None) })
+                .await,
+            None
+        );
+        assert_eq!(
+            resolver.resolve_local_known("unknown-model", Some(8_000)),
+            Some(8_000)
         );
     }
 

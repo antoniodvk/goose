@@ -379,7 +379,7 @@ pub fn model_info_for_provider_model(provider_name: &str, model_name: &str) -> M
     ModelInfo {
         name: model_name.to_string(),
         resolved_model: None,
-        context_limit: canonical.as_ref().map(|model| model.limit.context),
+        context_limit: canonical.as_ref().and_then(|model| model.limit.context),
         input_token_cost: None,
         output_token_cost: None,
         cache_read_token_cost: None,
@@ -561,15 +561,29 @@ pub trait Provider: MaybeSend + MaybeSync {
         collect_stream(stream).await
     }
 
-    /// Resolve the effective context limit for a model.
+    /// Resolve the context limit for a model if anything knows it.
     ///
     /// `override_limit` is consumer policy and takes precedence over provider
-    /// configuration and discovery. The method is infallible because providers
-    /// fall through to canonical metadata and the global default.
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    /// configuration, discovery and canonical metadata. `None` means the limit is
+    /// unknown; clients must not be told a guessed value.
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         crate::context_limit::ContextLimitResolver::new(self.get_name())
-            .resolve(model, override_limit, || async { Ok(None) })
+            .resolve_known(model, override_limit, || async { Ok(None) })
             .await
+    }
+
+    /// Resolve the effective context limit for internal budgeting.
+    ///
+    /// Same as `get_known_context_limit`, but falls back to the global default
+    /// when the limit is unknown, so it is infallible.
+    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+        self.get_known_context_limit(model, override_limit)
+            .await
+            .unwrap_or(crate::model::DEFAULT_CONTEXT_LIMIT)
     }
 
     fn retry_config(&self) -> RetryConfig {

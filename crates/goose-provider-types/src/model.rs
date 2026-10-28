@@ -170,7 +170,12 @@ impl ModelConfig {
                 self.max_tokens = canonical
                     .limit
                     .output
-                    .filter(|&output| output < canonical.limit.context)
+                    .filter(|&output| {
+                        canonical
+                            .limit
+                            .context
+                            .is_none_or(|context| output < context)
+                    })
                     .map(|output| output as i32);
             }
             if self.reasoning.is_none() {
@@ -949,7 +954,7 @@ mod tests {
                 "data_workflow_tools.goose.goose-gpt-6-astra",
             )
             .expect("GPT-6 Astra should have canonical metadata");
-            assert_eq!(canonical.limit.context, 1_050_000);
+            assert_eq!(canonical.limit.context, Some(1_050_000));
             assert_eq!(canonical.limit.output, Some(128_000));
             assert_eq!(config.max_tokens, Some(128_000));
             assert_eq!(config.reasoning, Some(true));

@@ -507,7 +507,10 @@ pub fn get_provider_template(provider_id: &str) -> Option<ProviderTemplate> {
                     ModelTemplate {
                         id: model_id,
                         name: model.name.clone(),
-                        context_limit: model.limit.context,
+                        context_limit: model
+                            .limit
+                            .context
+                            .unwrap_or(crate::model::DEFAULT_CONTEXT_LIMIT),
                         capabilities: ModelCapabilities {
                             tool_call: model.tool_call,
                             reasoning: model.reasoning.unwrap_or(false),

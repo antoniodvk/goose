@@ -202,6 +202,16 @@ impl Provider for GooseInferenceProvider {
         })))
     }
 
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
+        self.inner
+            .get_known_context_limit(model, override_limit)
+            .await
+    }
+
     async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
         self.inner.get_context_limit(model, override_limit).await
     }

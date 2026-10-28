@@ -213,7 +213,11 @@ impl Provider for OllamaCloudProvider {
         self.get_or_fetch_model_names().await
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         let configured_limits = self
             .custom_models
             .iter()
@@ -221,7 +225,7 @@ impl Provider for OllamaCloudProvider {
             .filter_map(|model| model.context_limit.map(|limit| (model.name.clone(), limit)));
         goose_providers::context_limit::ContextLimitResolver::new(self.get_name())
             .with_configured_limits(configured_limits)
-            .resolve(model, override_limit, || async {
+            .resolve_known(model, override_limit, || async {
                 if let Some(cached) = self
                     .context_limits
                     .lock()

@@ -6,8 +6,6 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-const DEFAULT_CONTEXT_LIMIT: usize = 128_000;
-
 fn normalize_provider_name(provider: &str) -> &str {
     match provider {
         "llama" => "meta-llama",
@@ -113,7 +111,8 @@ fn process_model(
             .get("limit")
             .and_then(|l| l.get("context"))
             .and_then(|v| v.as_u64())
-            .unwrap_or(DEFAULT_CONTEXT_LIMIT as u64) as usize,
+            .filter(|&v| v > 0)
+            .map(|v| v as usize),
         output: model_data
             .get("limit")
             .and_then(|l| l.get("output"))
@@ -281,8 +280,19 @@ mod tests {
         let registry = from_models_dev(json).unwrap();
         let model = registry.get("openai", "gpt-4o").unwrap();
         assert_eq!(model.id, "openai/gpt-4o");
-        assert_eq!(model.limit.context, 128000);
+        assert_eq!(model.limit.context, Some(128000));
         assert_eq!(model.cost.input, Some(2.5));
         assert!(from_models_dev("{}").is_err());
+    }
+
+    #[test]
+    fn missing_or_zero_context_stays_unknown() {
+        let json = r#"{"openai":{"models":{"no-limit":{"name":"A","tool_call":true},"zero":{"name":"B","tool_call":true,"limit":{"context":0,"output":10}}}}}"#;
+        let registry = from_models_dev(json).unwrap();
+        assert_eq!(
+            registry.get("openai", "no-limit").unwrap().limit.context,
+            None
+        );
+        assert_eq!(registry.get("openai", "zero").unwrap().limit.context, None);
     }
 }

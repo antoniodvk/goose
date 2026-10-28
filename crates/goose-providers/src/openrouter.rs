@@ -563,21 +563,29 @@ impl Provider for OpenRouterProvider {
         true
     }
 
-    async fn get_context_limit(&self, model: &str, override_limit: Option<usize>) -> usize {
+    async fn get_known_context_limit(
+        &self,
+        model: &str,
+        override_limit: Option<usize>,
+    ) -> Option<usize> {
         crate::context_limit::ContextLimitResolver::new(&self.name)
-            .resolve(model, override_limit, || async {
+            .resolve_known(model, override_limit, || async {
                 let canonical = maybe_get_canonical_model_with_variant_fallback(&self.name, model);
                 let base = strip_openrouter_variant(model);
                 // Exact catalog rows outrank live exact IDs; base fallbacks come after both.
-                if let Some((canonical, false)) = &canonical {
-                    return Ok(Some(canonical.limit.context));
+                if let Some(context) = canonical
+                    .as_ref()
+                    .filter(|(_, is_variant_fallback)| !is_variant_fallback)
+                    .and_then(|(canonical, _)| canonical.limit.context)
+                {
+                    return Ok(Some(context));
                 }
                 let models = self.get_or_fetch_models().await?;
                 Ok(models
                     .iter()
                     .find(|info| info.id == model)
                     .and_then(|info| info.context_length)
-                    .or_else(|| canonical.map(|(canonical, _)| canonical.limit.context))
+                    .or_else(|| canonical.and_then(|(canonical, _)| canonical.limit.context))
                     .or_else(|| {
                         base.and_then(|base| models.iter().find(|info| info.id == base))
                             .and_then(|info| info.context_length)
@@ -744,7 +752,7 @@ mod tests {
                 "{} must support text input",
                 model.name
             );
-            assert!(canonical.limit.context > 0);
+            assert!(canonical.limit.context.unwrap_or(0) > 0);
         }
     }
 
@@ -1009,7 +1017,9 @@ mod tests {
             64_000
         );
         assert_eq!(
-            provider.get_context_limit(MODEL_IN_CATALOG, None).await,
+            provider
+                .get_known_context_limit(MODEL_IN_CATALOG, None)
+                .await,
             catalog_limit
         );
     }
