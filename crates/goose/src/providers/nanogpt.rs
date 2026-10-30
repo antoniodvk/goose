@@ -7,11 +7,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use goose_providers::errors::ProviderError;
-use goose_providers::formats::openai::{create_request, reasoning_effort_for_thinking_in_catalog};
+use goose_providers::formats::openai::{
+    create_request, nearest_reasoning_effort, reasoning_effort_for_thinking_in_catalog,
+};
 use goose_providers::images::ImageFormat;
 use goose_providers::model::ModelConfig;
 use goose_providers::request_log::{start_log, LoggerHandleExt};
 use rmcp::model::Tool;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 pub const NANOGPT_PROVIDER_NAME: &str = "nano-gpt";
 pub const NANOGPT_API_HOST: &str = "https://nano-gpt.com/api/v1";
@@ -26,6 +30,9 @@ pub struct NanoGptProvider {
     api_client: ApiClient,
     #[serde(skip)]
     name: String,
+    /// `reasoning_efforts` per model from NanoGPT's own model list (N485).
+    #[serde(skip)]
+    reasoning_efforts: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
 impl NanoGptProvider {
@@ -62,6 +69,72 @@ impl NanoGptProvider {
         }
     }
 
+    /// Models from the `models?detailed=true` answer that take tools, and the
+    /// effort levels each of them declares.
+    fn parse_models(json: &serde_json::Value) -> Result<Vec<serde_json::Value>, ProviderError> {
+        if let Some(err_obj) = json.get("error") {
+            let msg = err_obj
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(ProviderError::RequestFailed(format!(
+                "NanoGPT API returned an error: {}",
+                msg
+            )));
+        }
+
+        json.get("data")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .ok_or_else(|| {
+                ProviderError::RequestFailed("Missing 'data' field in JSON response".into())
+            })
+    }
+
+    fn store_reasoning_efforts(&self, data: &[serde_json::Value]) {
+        let efforts: HashMap<String, Vec<String>> = data
+            .iter()
+            .filter_map(|model| {
+                let id = model.get("id")?.as_str()?;
+                let levels: Vec<String> = model
+                    .get("reasoning_efforts")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|level| level.as_str().map(str::to_string))
+                    .collect();
+                (!levels.is_empty()).then(|| (id.to_string(), levels))
+            })
+            .collect();
+        if let Ok(mut guard) = self.reasoning_efforts.write() {
+            *guard = efforts;
+        }
+    }
+
+    async fn fetch_model_list(&self) -> Result<Vec<serde_json::Value>, ProviderError> {
+        let response = self
+            .api_client
+            .request("models?detailed=true")
+            .response_get()
+            .await
+            .map_err(|e| {
+                ProviderError::RequestFailed(format!(
+                    "Failed to fetch models from NanoGPT API: {}",
+                    e
+                ))
+            })?;
+
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            ProviderError::RequestFailed(format!(
+                "Failed to parse NanoGPT models API response as JSON: {}",
+                e
+            ))
+        })?;
+
+        let data = Self::parse_models(&json)?;
+        self.store_reasoning_efforts(&data);
+        Ok(data)
+    }
+
     pub async fn from_env(
         tls_config: Option<crate::providers::api_client::TlsConfig>,
     ) -> Result<Self> {
@@ -80,10 +153,17 @@ impl NanoGptProvider {
         let api_client = Self::build_client(&host, &api_key, tls_config)?
             .with_request_builder(crate::session_context::session_id_request_builder());
 
-        Ok(Self {
+        let provider = Self {
             api_client,
             name: NANOGPT_PROVIDER_NAME.to_string(),
-        })
+            reasoning_efforts: Arc::default(),
+        };
+        // The chat's effort menu is built from this list; without it goose
+        // falls back to its catalog.
+        if let Err(error) = provider.fetch_model_list().await {
+            tracing::debug!("NanoGPT effort levels unavailable: {}", error);
+        }
+        Ok(provider)
     }
 }
 
@@ -119,39 +199,7 @@ impl Provider for NanoGptProvider {
     }
 
     async fn fetch_supported_models(&self) -> Result<Vec<String>, ProviderError> {
-        let response = self
-            .api_client
-            .request("models?detailed=true")
-            .response_get()
-            .await
-            .map_err(|e| {
-                ProviderError::RequestFailed(format!(
-                    "Failed to fetch models from NanoGPT API: {}",
-                    e
-                ))
-            })?;
-
-        let json: serde_json::Value = response.json().await.map_err(|e| {
-            ProviderError::RequestFailed(format!(
-                "Failed to parse NanoGPT models API response as JSON: {}",
-                e
-            ))
-        })?;
-
-        if let Some(err_obj) = json.get("error") {
-            let msg = err_obj
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error");
-            return Err(ProviderError::RequestFailed(format!(
-                "NanoGPT API returned an error: {}",
-                msg
-            )));
-        }
-
-        let data = json.get("data").and_then(|v| v.as_array()).ok_or_else(|| {
-            ProviderError::RequestFailed("Missing 'data' field in JSON response".into())
-        })?;
+        let data = self.fetch_model_list().await?;
 
         let mut models: Vec<String> = data
             .iter()
@@ -174,6 +222,10 @@ impl Provider for NanoGptProvider {
         Ok(models)
     }
 
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        self.reasoning_efforts.read().ok()?.get(model_name).cloned()
+    }
+
     async fn stream(
         &self,
         model_config: &ModelConfig,
@@ -190,15 +242,21 @@ impl Provider for NanoGptProvider {
             true,
         )?;
 
-        // create_request sends reasoning_effort only for OpenAI models; NanoGPT
-        // takes it for every reasoning model (N460).
-        if payload.get("reasoning_effort").is_none() && model_config.is_reasoning_model() {
-            if let Some(effort) = model_config.thinking_effort().and_then(|effort| {
-                reasoning_effort_for_thinking_in_catalog(
+        // create_request clamps reasoning_effort against the OpenAI catalog; NanoGPT
+        // takes it for every reasoning model (N460), with the levels its own
+        // model list declares (N485).
+        if model_config.is_reasoning_model() {
+            let declared = self.declared_reasoning_efforts(&model_config.model_name);
+            if let Some(effort) = model_config.thinking_effort().and_then(|effort| match &declared
+            {
+                Some(levels) => {
+                    nearest_reasoning_effort(Some(levels), &model_config.model_name, effort)
+                }
+                None => reasoning_effort_for_thinking_in_catalog(
                     NANOGPT_PROVIDER_NAME,
                     &model_config.model_name,
                     effort,
-                )
+                ),
             }) {
                 payload["reasoning_effort"] = serde_json::json!(effort);
             }

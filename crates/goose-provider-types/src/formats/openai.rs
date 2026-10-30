@@ -1952,12 +1952,15 @@ pub fn reasoning_effort_for_thinking_in_catalog(
     model_name: &str,
     effort: ThinkingEffort,
 ) -> Option<String> {
-    let catalog = crate::canonical::maybe_get_canonical_model(provider, model_name);
-    let catalog_efforts = catalog
-        .as_ref()
-        .and_then(|model| model.reasoning_efforts.as_deref());
+    let catalog_efforts = catalog_reasoning_efforts(provider, model_name);
 
-    nearest_reasoning_effort(catalog_efforts, model_name, effort)
+    nearest_reasoning_effort(catalog_efforts.as_deref(), model_name, effort)
+}
+
+/// The `reasoning_effort` levels the catalog lists for `provider`'s entry of
+/// `model_name`, if it has an entry with levels.
+pub fn catalog_reasoning_efforts(provider: &str, model_name: &str) -> Option<Vec<String>> {
+    crate::canonical::maybe_get_canonical_model(provider, model_name)?.reasoning_efforts
 }
 
 /// The thinking efforts goose offers for a model whose accepted

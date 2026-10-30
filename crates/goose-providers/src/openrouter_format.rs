@@ -134,9 +134,14 @@ pub fn apply_reasoning_config(payload: &mut Value, model_config: &ModelConfig) -
             return false;
         }
 
-        let effort = clamped_effort
-            .as_deref()
-            .or_else(|| reasoning_effort_for_openrouter(effort));
+        // The effort in the payload was clamped against the *OpenAI* catalog, which
+        // knows neither `xhigh` nor `max` for other vendors' models. OpenRouter's own
+        // catalog entry decides; without one, goose sends its fixed mapping (N485).
+        let model_name = &model_config.model_name;
+        let effort = match openai::catalog_reasoning_efforts("openrouter", model_name) {
+            Some(levels) => openai::nearest_reasoning_effort(Some(&levels), model_name, effort),
+            None => reasoning_effort_for_openrouter(effort).map(str::to_owned),
+        };
         if let Some(effort) = effort {
             obj.insert("reasoning".to_string(), json!({ "effort": effort }));
         }
