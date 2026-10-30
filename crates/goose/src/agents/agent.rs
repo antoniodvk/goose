@@ -110,7 +110,8 @@ pub(super) fn available_auto_efforts(
         }
         ThinkingEffortSupport::Unspecified
         | ThinkingEffortSupport::Unsupported
-        | ThinkingEffortSupport::Options(_) => Vec::new(),
+        | ThinkingEffortSupport::Options(_)
+        | ThinkingEffortSupport::Declared(_) => Vec::new(),
     }
 }
 

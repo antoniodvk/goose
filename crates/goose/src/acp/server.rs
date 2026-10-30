@@ -5,6 +5,7 @@ pub(super) use crate::acp::response_builder::{
     build_provider_options, build_session_info, build_session_setup_config,
     send_session_setup_notifications, session_meta, session_provider_selection,
     session_response_meta, should_refresh_inventory_for_session_init,
+    thinking_effort_support_for_model,
 };
 use crate::acp::tool_call_notifier::ToolCallNotifier;
 use crate::acp::{PermissionDecision, ACP_CURRENT_MODEL};
@@ -2551,7 +2552,7 @@ impl GooseAcpAgent {
             &current_model_config,
             session_provider_selection(&session),
             provider_options,
-            &provider.thinking_effort_support(),
+            &thinking_effort_support_for_model(provider.as_ref(), &current_model_config.model_name),
         );
         let notification = SessionNotification::new(
             session_id.clone(),

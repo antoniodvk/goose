@@ -421,6 +421,7 @@ fn model_info_for_deployment(deployment_name: &str, model_name: &str) -> ModelIn
         supports_vision: None,
         thinking_preservation_format: None,
         request_params: None,
+        reasoning_efforts: None,
     }
 }
 

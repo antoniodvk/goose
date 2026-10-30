@@ -623,6 +623,7 @@ mod tests {
                 supports_vision: None,
                 thinking_preservation_format: None,
                 request_params: None,
+                reasoning_efforts: None,
             }],
             headers: None,
             session_id_header_override: None,

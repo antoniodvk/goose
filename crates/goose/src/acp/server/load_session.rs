@@ -455,7 +455,15 @@ impl GooseAcpAgent {
         let (mode_state, config_options) = build_session_setup_config(
             &self.provider_inventory,
             &session,
-            &agent_thinking_effort_support(&agent, &session.id).await,
+            &agent_thinking_effort_support(
+                &agent,
+                &session.id,
+                session
+                    .model_config
+                    .as_ref()
+                    .map(|config| config.model_name.as_str()),
+            )
+            .await,
         )
         .await?;
 

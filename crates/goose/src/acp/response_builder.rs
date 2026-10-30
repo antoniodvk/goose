@@ -238,10 +238,35 @@ pub(super) fn build_mode_state(
 pub(super) async fn agent_thinking_effort_support(
     agent: &Agent,
     session_id: &str,
+    model_name: Option<&str>,
 ) -> ThinkingEffortSupport {
-    match agent.provider(session_id).await {
-        Ok(provider) => provider.thinking_effort_support(),
-        Err(_) => ThinkingEffortSupport::Unspecified,
+    match (agent.provider(session_id).await, model_name) {
+        (Ok(provider), Some(model_name)) => {
+            thinking_effort_support_for_model(provider.as_ref(), model_name)
+        }
+        (Ok(provider), None) => provider.thinking_effort_support(),
+        (Err(_), _) => ThinkingEffortSupport::Unspecified,
+    }
+}
+
+/// A provider that leaves the menu to goose may still declare which
+/// `reasoning_effort` levels the model accepts (N481); then only those are offered.
+pub(super) fn thinking_effort_support_for_model(
+    provider: &dyn goose_providers::base::Provider,
+    model_name: &str,
+) -> ThinkingEffortSupport {
+    match provider.thinking_effort_support() {
+        ThinkingEffortSupport::Unspecified => provider
+            .declared_reasoning_efforts(model_name)
+            .map(|declared| {
+                goose_providers::formats::openai::thinking_efforts_for_reasoning_efforts(&declared)
+            })
+            .filter(|efforts| !efforts.is_empty())
+            .map_or(
+                ThinkingEffortSupport::Unspecified,
+                ThinkingEffortSupport::Declared,
+            ),
+        other => other,
     }
 }
 
@@ -353,6 +378,37 @@ fn build_thinking_effort_choices(
                 .collect(),
             capability_thinking_effort_value(capability, model_config),
         ),
+        ThinkingEffortSupport::Declared(efforts) => {
+            let rank = |effort: &ThinkingEffort| match effort {
+                ThinkingEffort::Off => 0_i32,
+                ThinkingEffort::Low => 1,
+                ThinkingEffort::Medium => 2,
+                ThinkingEffort::High => 3,
+                ThinkingEffort::Max => 4,
+            };
+            let configured = model_config
+                .thinking_effort()
+                .or_else(|| Config::global().get_goose_thinking_effort());
+            let current = configured
+                .and_then(|configured| {
+                    efforts
+                        .iter()
+                        .min_by_key(|effort| (rank(effort) - rank(&configured)).abs())
+                })
+                .or_else(|| efforts.first())
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            (
+                efforts
+                    .iter()
+                    .map(|effort| {
+                        let effort = effort.to_string();
+                        SessionConfigSelectOption::new(effort.clone(), effort)
+                    })
+                    .collect(),
+                current,
+            )
+        }
         ThinkingEffortSupport::Unsupported => {
             let off = ThinkingEffort::Off.to_string();
             (
@@ -746,6 +802,27 @@ mod tests {
             provider_options,
             &ThinkingEffortSupport::Unspecified,
         )
+    }
+
+    #[test]
+    fn declared_efforts_are_the_only_menu_choices() {
+        let declared = goose_providers::formats::openai::thinking_efforts_for_reasoning_efforts(&[
+            "low".to_string(),
+            "high".to_string(),
+            "max".to_string(),
+        ]);
+        let model_config =
+            ModelConfig::new("m1").with_merged_request_params(std::collections::HashMap::from([(
+                "thinking_effort".to_string(),
+                serde_json::json!("medium"),
+            )]));
+        let (options, current) = build_thinking_effort_choices(
+            &model_config,
+            &ThinkingEffortSupport::Declared(declared),
+        );
+        let values: Vec<String> = options.iter().map(|o| o.value.to_string()).collect();
+        assert_eq!(values, ["low", "high", "max"]);
+        assert_eq!(current, "low");
     }
 
     #[test]

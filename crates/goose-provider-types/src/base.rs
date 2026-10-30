@@ -280,6 +280,10 @@ pub struct ModelInfo {
     /// Static params merged into the request body for this model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_params: Option<HashMap<String, Value>>,
+    /// Effort levels the model accepts as `reasoning_effort` (e.g. `low`, `high`, `max`);
+    /// when set, goose offers only these in the chat and sends the closest one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 impl ModelInfo {
@@ -298,6 +302,7 @@ impl ModelInfo {
             supports_vision: None,
             thinking_preservation_format: None,
             request_params: None,
+            reasoning_efforts: None,
         }
     }
 
@@ -337,6 +342,7 @@ impl ModelInfo {
             supports_vision: None,
             thinking_preservation_format: None,
             request_params: None,
+            reasoning_efforts: None,
         }
     }
 }
@@ -390,6 +396,7 @@ pub fn model_info_for_provider_model(provider_name: &str, model_name: &str) -> M
         supports_vision: None,
         thinking_preservation_format: None,
         request_params: None,
+        reasoning_efforts: None,
     }
 }
 
@@ -754,6 +761,12 @@ pub trait Provider: MaybeSend + MaybeSync {
     /// advertised capability; the default keeps the model-name-based path.
     fn thinking_effort_support(&self) -> ThinkingEffortSupport {
         ThinkingEffortSupport::Unspecified
+    }
+
+    /// `reasoning_effort` levels the provider's own model list declares for
+    /// `model_name`; `None` keeps the model-name-based menu.
+    fn declared_reasoning_efforts(&self, _model_name: &str) -> Option<Vec<String>> {
+        None
     }
 
     /// Subscribe to provider-managed thinking-effort capability changes.
@@ -1149,6 +1162,7 @@ mod tests {
             supports_vision: None,
             thinking_preservation_format: None,
             request_params: None,
+            reasoning_efforts: None,
         };
         assert_eq!(info.context_limit, Some(1000));
 
@@ -1167,6 +1181,7 @@ mod tests {
             supports_vision: None,
             thinking_preservation_format: None,
             request_params: None,
+            reasoning_efforts: None,
         };
         assert_eq!(info, info2);
 
@@ -1185,6 +1200,7 @@ mod tests {
             supports_vision: None,
             thinking_preservation_format: None,
             request_params: None,
+            reasoning_efforts: None,
         };
         assert_ne!(info, info3);
     }

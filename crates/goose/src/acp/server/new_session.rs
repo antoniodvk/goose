@@ -94,7 +94,15 @@ impl GooseAcpAgent {
             .build_new_session_response(
                 &reloaded_session,
                 &extension_results,
-                &super::agent_thinking_effort_support(&agent, &reloaded_session.id).await,
+                &super::agent_thinking_effort_support(
+                    &agent,
+                    &reloaded_session.id,
+                    reloaded_session
+                        .model_config
+                        .as_ref()
+                        .map(|config| config.model_name.as_str()),
+                )
+                .await,
             )
             .await?;
         Ok(response)

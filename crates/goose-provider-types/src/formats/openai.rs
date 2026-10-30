@@ -1957,6 +1957,42 @@ pub fn reasoning_effort_for_thinking_in_catalog(
         .as_ref()
         .and_then(|model| model.reasoning_efforts.as_deref());
 
+    nearest_reasoning_effort(catalog_efforts, model_name, effort)
+}
+
+/// The thinking efforts goose offers for a model whose accepted
+/// `reasoning_effort` levels are `declared` (N481). Several levels can map to
+/// one effort (`low`/`minimal`, `xhigh`/`max`), so each effort appears once.
+pub fn thinking_efforts_for_reasoning_efforts(declared: &[String]) -> Vec<ThinkingEffort> {
+    [
+        ThinkingEffort::Off,
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::Max,
+    ]
+    .into_iter()
+    .filter(|effort| {
+        declared.iter().any(|level| match level.as_str() {
+            "none" => *effort == ThinkingEffort::Off,
+            "minimal" | "low" => *effort == ThinkingEffort::Low,
+            "medium" => *effort == ThinkingEffort::Medium,
+            "high" => *effort == ThinkingEffort::High,
+            "xhigh" | "max" => *effort == ThinkingEffort::Max,
+            _ => false,
+        })
+    })
+    .collect()
+}
+
+/// The `offered` level closest to `effort`; without `offered`, the widely
+/// supported fallback levels for `model_name`.
+pub fn nearest_reasoning_effort(
+    offered: Option<&[String]>,
+    model_name: &str,
+    effort: ThinkingEffort,
+) -> Option<String> {
+    let catalog_efforts = offered;
     let preferred: &[&str] = match effort {
         ThinkingEffort::Off => &["none", "minimal", "low"],
         ThinkingEffort::Low => &["low", "minimal", "medium", "high", "xhigh"],

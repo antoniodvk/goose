@@ -364,6 +364,8 @@ pub enum ThinkingEffortSupport {
     Unsupported,
     /// The provider passes through a harness-advertised effort option.
     Options(ThinkingEffortCapability),
+    /// goose owns the menu, but the model declares which levels it accepts.
+    Declared(Vec<ThinkingEffort>),
 }
 
 #[cfg(test)]

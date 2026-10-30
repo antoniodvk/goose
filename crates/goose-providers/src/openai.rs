@@ -557,15 +557,20 @@ impl OpenAiProvider {
                 }
             }
 
-            // Experiential's gateway takes the chosen level as is for every
-            // model; a level fixed in the model's request_params stays (N463).
-            if self.name == "custom_experiential" && !obj.contains_key("reasoning_effort") {
-                if let Some(effort) = model_config.thinking_effort() {
-                    let level = match effort {
-                        ThinkingEffort::Off => "none".to_string(),
-                        other => other.to_string(),
-                    };
-                    obj.insert("reasoning_effort".to_string(), json!(level));
+            // A model that declares its `reasoning_efforts` gets the closest of
+            // them; a level fixed in the model's request_params stays (N481).
+            if !obj.contains_key("reasoning_effort") {
+                let declared = self
+                    .declared_model(&model_config.model_name)
+                    .and_then(|model| model.reasoning_efforts.as_deref());
+                if let (Some(declared), Some(effort)) = (declared, model_config.thinking_effort()) {
+                    if let Some(level) = crate::formats::openai::nearest_reasoning_effort(
+                        Some(declared),
+                        &model_config.model_name,
+                        effort,
+                    ) {
+                        obj.insert("reasoning_effort".to_string(), json!(level));
+                    }
                 }
             }
 
@@ -765,6 +770,10 @@ impl Provider for OpenAiProvider {
 
     fn skip_canonical_filtering(&self) -> bool {
         self.skip_canonical_filtering
+    }
+
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        self.declared_model(model_name)?.reasoning_efforts.clone()
     }
 
     async fn get_known_context_limit(
@@ -1319,6 +1328,35 @@ mod tests {
         let obj = result.as_object().unwrap();
 
         assert_eq!(obj.get("reasoning_effort"), Some(&json!("low")));
+    }
+
+    #[test]
+    fn sanitize_sends_closest_declared_reasoning_effort() {
+        let mut provider = make_provider("custom_gateway");
+        let mut model = crate::base::ModelInfo::new("m1");
+        model.reasoning_efforts = Some(vec!["low".into(), "high".into(), "max".into()]);
+        provider.custom_models = Some(vec![model]);
+        let payload = json!({ "model": "m1", "messages": [] });
+
+        let medium = ModelConfig::new("m1").with_thinking_effort(ThinkingEffort::Medium);
+        let result = provider.sanitize_request_for_compat(payload.clone(), &medium);
+        assert_eq!(result.get("reasoning_effort"), Some(&json!("high")));
+
+        let max = ModelConfig::new("m1").with_thinking_effort(ThinkingEffort::Max);
+        let result = provider.sanitize_request_for_compat(payload.clone(), &max);
+        assert_eq!(result.get("reasoning_effort"), Some(&json!("max")));
+
+        let unset = ModelConfig::new("m1");
+        let result = provider.sanitize_request_for_compat(payload, &unset);
+        assert!(result.get("reasoning_effort").is_none());
+        assert_eq!(
+            provider.declared_reasoning_efforts("m1"),
+            Some(vec![
+                "low".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ])
+        );
     }
 
     #[test]
