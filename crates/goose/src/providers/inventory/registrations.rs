@@ -206,7 +206,7 @@ pub fn muse_code_inventory() -> InventoryRegistration {
 
 pub fn chatgpt_codex_inventory() -> InventoryRegistration {
     InventoryRegistration {
-        supports_refresh: false,
+        supports_refresh: true,
         identity: default_inventory_identity_resolver(),
         configured: None,
     }
