@@ -23,6 +23,7 @@ use rmcp::model::{ContentBlock, Role, Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest;
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -47,53 +48,30 @@ const HTML_AUTO_CLOSE_TIMEOUT_MS: u64 = 2000;
 const CHATGPT_CODEX_PROVIDER_NAME: &str = "chatgpt_codex";
 pub const CHATGPT_CODEX_DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
-#[derive(Debug)]
-pub struct ChatGptCodexModelAttrs {
-    pub name: &'static str,
-    pub reasoning_levels: &'static [&'static str],
-}
-
-pub const CHATGPT_CODEX_KNOWN_MODELS: &[ChatGptCodexModelAttrs] = &[
-    ChatGptCodexModelAttrs {
-        name: "gpt-5.6-sol",
-        reasoning_levels: &["none", "low", "medium", "high", "xhigh"],
-    },
-    ChatGptCodexModelAttrs {
-        name: "gpt-5.6-terra",
-        reasoning_levels: &["none", "low", "medium", "high", "xhigh"],
-    },
-    ChatGptCodexModelAttrs {
-        name: "gpt-5.6-luna",
-        reasoning_levels: &["none", "low", "medium", "high", "xhigh"],
-    },
-    ChatGptCodexModelAttrs {
-        name: "gpt-5.6",
-        reasoning_levels: &["none", "low", "medium", "high", "xhigh"],
-    },
-    ChatGptCodexModelAttrs {
-        name: "gpt-5.5",
-        reasoning_levels: &["low", "medium", "high", "xhigh"],
-    },
-    ChatGptCodexModelAttrs {
-        name: "gpt-5.4",
-        reasoning_levels: &["low", "medium", "high", "xhigh"],
-    },
-];
-
 const CHATGPT_CODEX_DOC_URL: &str = "https://openai.com/chatgpt";
 
-const DEFAULT_REASONING_LEVELS: &[&str] = &["medium", "high"];
+/// Reasoning levels per model slug, as the Codex catalog reports them
+/// (`supported_reasoning_levels`). Filled by every catalog fetch.
+static REASONING_LEVELS: LazyLock<std::sync::Mutex<HashMap<String, Vec<String>>>> =
+    LazyLock::new(Default::default);
 
-pub fn reasoning_levels_for_model(model_name: &str) -> &'static [&'static str] {
-    CHATGPT_CODEX_KNOWN_MODELS
-        .iter()
-        .find(|m| m.name == model_name)
-        .map(|m| m.reasoning_levels)
-        .unwrap_or(DEFAULT_REASONING_LEVELS)
+fn reasoning_levels_for_model(model_name: &str) -> Option<Vec<String>> {
+    REASONING_LEVELS.lock().ok()?.get(model_name).cloned()
 }
 
-fn known_model_names() -> Vec<&'static str> {
-    CHATGPT_CODEX_KNOWN_MODELS.iter().map(|m| m.name).collect()
+fn remember_reasoning_levels(models: &[CodexCatalogEntry]) {
+    if let Ok(mut levels) = REASONING_LEVELS.lock() {
+        for model in models {
+            levels.insert(
+                model.slug.clone(),
+                model
+                    .supported_reasoning_levels
+                    .iter()
+                    .map(|level| level.effort().to_string())
+                    .collect(),
+            );
+        }
+    }
 }
 
 /// The Codex catalog endpoint requires a semver `client_version` and withholds
@@ -116,6 +94,25 @@ struct CodexCatalogEntry {
     supported_in_api: bool,
     #[serde(default)]
     priority: Option<i64>,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<CodexReasoningLevel>,
+}
+
+/// The catalog lists each level either as a bare name or as an object that
+/// carries the name in `effort` next to a description.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum CodexReasoningLevel {
+    Name(String),
+    Preset { effort: String },
+}
+
+impl CodexReasoningLevel {
+    fn effort(&self) -> &str {
+        match self {
+            Self::Name(effort) | Self::Preset { effort } => effort,
+        }
+    }
 }
 
 /// `models` is required. A successful response that omits it - an error
@@ -262,15 +259,14 @@ fn build_input_items(messages: &[Message]) -> Result<Vec<Value>> {
     Ok(items)
 }
 
-fn get_reasoning_effort(model_name: &str) -> String {
+fn get_reasoning_effort(model_name: &str, valid_levels: &[String]) -> String {
     let config = crate::config::Config::global();
     let effort = config
         .get_chatgpt_codex_reasoning_effort()
         .map(String::from)
         .unwrap_or_else(|_| "medium".to_string());
 
-    let valid_levels = reasoning_levels_for_model(model_name);
-    if valid_levels.contains(&effort.as_str()) {
+    if valid_levels.contains(&effort) {
         effort
     } else {
         tracing::warn!(
@@ -282,16 +278,19 @@ fn get_reasoning_effort(model_name: &str) -> String {
     }
 }
 
-fn reasoning_effort_for_config(model_config: &ModelConfig) -> Option<String> {
+fn reasoning_effort_for_config(
+    model_config: &ModelConfig,
+    valid_levels: &[String],
+) -> Option<String> {
     use goose_providers::thinking::ThinkingEffort;
 
+    let supports = |level: &str| valid_levels.iter().any(|l| l == level);
     model_config
         .thinking_effort()
         .map(|effort| {
-            let valid_levels = reasoning_levels_for_model(&model_config.model_name);
             let preferred_levels: &[&str] = match effort {
                 ThinkingEffort::Off => {
-                    return Some(if valid_levels.contains(&"none") {
+                    return Some(if supports("none") {
                         "none".to_string()
                     } else {
                         "low".to_string()
@@ -305,10 +304,10 @@ fn reasoning_effort_for_config(model_config: &ModelConfig) -> Option<String> {
 
             preferred_levels
                 .iter()
-                .find(|level| valid_levels.contains(level))
+                .find(|level| supports(level))
                 .map(|level| (*level).to_string())
         })
-        .unwrap_or_else(|| Some(get_reasoning_effort(&model_config.model_name)))
+        .unwrap_or_else(|| Some(get_reasoning_effort(&model_config.model_name, valid_levels)))
 }
 
 fn create_codex_request(
@@ -316,9 +315,11 @@ fn create_codex_request(
     system: &str,
     messages: &[Message],
     tools: &[Tool],
+    reasoning_levels: Option<&[String]>,
 ) -> Result<Value> {
     let input_items = build_input_items(messages)?;
-    let reasoning_effort = reasoning_effort_for_config(model_config);
+    let reasoning_effort =
+        reasoning_levels.and_then(|levels| reasoning_effort_for_config(model_config, levels));
 
     let mut payload = json!({
         "model": model_config.model_name,
@@ -912,6 +913,18 @@ impl ChatGptCodexProvider {
         })
     }
 
+    /// The levels the Codex catalog lists for `model_name`. A model the catalog
+    /// does not list gets no `reasoning` field, so the server default applies.
+    async fn reasoning_levels(&self, model_name: &str) -> Option<Vec<String>> {
+        if let Some(levels) = reasoning_levels_for_model(model_name) {
+            return Some(levels);
+        }
+        if let Err(error) = self.fetch_catalog().await {
+            tracing::warn!("Codex catalog unavailable for reasoning levels: {error}");
+        }
+        reasoning_levels_for_model(model_name)
+    }
+
     async fn fetch_catalog(&self) -> Result<Vec<String>, ProviderError> {
         let token_data = self.auth_provider.get_cached_token().await?;
         fetch_catalog_with_token(&self.models_endpoint, &token_data).await
@@ -990,10 +1003,9 @@ async fn fetch_catalog_with_token(
         .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
     let response = handle_status(response).await?;
     let catalog: CodexCatalog = goose_providers::http_status::read_json_response(response).await?;
-    Ok(selectable_models(catalog)
-        .into_iter()
-        .map(|model| model.slug)
-        .collect())
+    let models = selectable_models(catalog);
+    remember_reasoning_levels(&models);
+    Ok(models.into_iter().map(|model| model.slug).collect())
 }
 
 impl goose_providers::base::ProviderDescriptor for ChatGptCodexProvider {
@@ -1003,7 +1015,7 @@ impl goose_providers::base::ProviderDescriptor for ChatGptCodexProvider {
             "ChatGPT Codex",
             "Use your ChatGPT Plus/Pro subscription for GPT-5 Codex models via OAuth",
             CHATGPT_CODEX_DEFAULT_MODEL,
-            known_model_names(),
+            vec![CHATGPT_CODEX_DEFAULT_MODEL],
             CHATGPT_CODEX_DOC_URL,
             vec![ConfigKey::new_oauth(
                 "CHATGPT_CODEX_TOKEN",
@@ -1057,8 +1069,15 @@ impl Provider for ChatGptCodexProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        let mut payload = create_codex_request(model_config, system, messages, tools)
-            .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
+        let reasoning_levels = self.reasoning_levels(&model_config.model_name).await;
+        let mut payload = create_codex_request(
+            model_config,
+            system,
+            messages,
+            tools,
+            reasoning_levels.as_deref(),
+        )
+        .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
         payload["stream"] = serde_json::Value::Bool(true);
 
         let response = self
@@ -1299,7 +1318,14 @@ mod tests {
         let mut config = ModelConfig::new("gpt-5.5");
         config.request_params = Some(params);
 
-        let payload = create_codex_request(&config, "sys", &[], &[]).unwrap();
+        let payload = create_codex_request(
+            &config,
+            "sys",
+            &[],
+            &[],
+            Some(&["low", "medium", "high", "xhigh"].map(String::from)[..]),
+        )
+        .unwrap();
         assert_eq!(payload["reasoning"]["effort"], "xhigh");
         assert!(payload.get("reasoning_effort").is_none());
     }
@@ -1308,10 +1334,17 @@ mod tests {
     fn test_create_codex_request_caps_unified_thinking_to_supported_level() {
         let mut params = std::collections::HashMap::new();
         params.insert("thinking_effort".to_string(), json!("max"));
-        let mut config = ModelConfig::new("unknown-model");
+        let mut config = ModelConfig::new("some-model");
         config.request_params = Some(params);
 
-        let payload = create_codex_request(&config, "sys", &[], &[]).unwrap();
+        let payload = create_codex_request(
+            &config,
+            "sys",
+            &[],
+            &[],
+            Some(&["medium", "high"].map(String::from)[..]),
+        )
+        .unwrap();
         assert_eq!(payload["reasoning"]["effort"], "high");
         assert!(payload.get("reasoning_effort").is_none());
     }
@@ -1323,7 +1356,14 @@ mod tests {
         let mut config = ModelConfig::new("gpt-5.6-sol");
         config.request_params = Some(params);
 
-        let payload = create_codex_request(&config, "sys", &[], &[]).unwrap();
+        let payload = create_codex_request(
+            &config,
+            "sys",
+            &[],
+            &[],
+            Some(&["none", "low", "medium", "high", "xhigh"].map(String::from)[..]),
+        )
+        .unwrap();
         assert_eq!(payload["reasoning"]["effort"], "none");
         assert!(payload.get("reasoning_effort").is_none());
     }
@@ -1333,7 +1373,7 @@ mod tests {
     fn test_create_codex_request_omits_temperature() {
         let config = ModelConfig::new("gpt-5.5").with_temperature(Some(0.2));
 
-        let payload = create_codex_request(&config, "sys", &[], &[]).unwrap();
+        let payload = create_codex_request(&config, "sys", &[], &[], None).unwrap();
         assert!(payload.get("temperature").is_none());
     }
 
@@ -1487,29 +1527,44 @@ mod tests {
         assert_eq!(tokens.expires_in, Some(1800));
     }
 
-    #[test_case("gpt-5.6-sol", &["none", "low", "medium", "high", "xhigh"]; "gpt 5.6 sol supports extended reasoning levels")]
-    #[test_case("gpt-5.6-terra", &["none", "low", "medium", "high", "xhigh"]; "gpt 5.6 terra supports extended reasoning levels")]
-    #[test_case("gpt-5.6-luna", &["none", "low", "medium", "high", "xhigh"]; "gpt 5.6 luna supports extended reasoning levels")]
-    #[test_case("gpt-5.6", &["none", "low", "medium", "high", "xhigh"]; "gpt 5.6 supports extended reasoning levels")]
-    #[test_case("unknown-model", &["medium", "high"]; "unknown model gets default reasoning levels")]
-    fn test_reasoning_levels_for_model(model: &str, expected: &[&str]) {
-        assert_eq!(reasoning_levels_for_model(model), expected);
+    #[test]
+    fn test_create_codex_request_omits_reasoning_for_a_model_the_catalog_does_not_list() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("thinking_effort".to_string(), json!("high"));
+        let mut config = ModelConfig::new("unlisted-model");
+        config.request_params = Some(params);
+
+        let payload = create_codex_request(&config, "sys", &[], &[], None).unwrap();
+        assert!(payload.get("reasoning").is_none());
     }
 
     #[test]
-    fn test_known_model_names_include_gpt_5_6_models() {
-        let names = known_model_names();
+    fn catalog_levels_are_read_as_names_or_presets() {
+        let catalog: CodexCatalog = serde_json::from_value(json!({
+            "models": [{
+                "slug": "level-test-model",
+                "supported_in_api": true,
+                "supported_reasoning_levels": [
+                    "low",
+                    {"effort": "high", "description": "Greater depth"}
+                ]
+            }]
+        }))
+        .unwrap();
 
-        assert!(names.contains(&"gpt-5.6-sol"));
-        assert!(names.contains(&"gpt-5.6-terra"));
-        assert!(names.contains(&"gpt-5.6-luna"));
-        assert!(names.contains(&"gpt-5.6"));
+        remember_reasoning_levels(&catalog.models);
+
+        assert_eq!(
+            reasoning_levels_for_model("level-test-model"),
+            Some(vec!["low".to_string(), "high".to_string()])
+        );
+        assert_eq!(reasoning_levels_for_model("never-listed"), None);
     }
 
     #[test]
     fn test_instructions_passed_through() {
         let model = ModelConfig::new("gpt-5.4");
-        let payload = create_codex_request(&model, "system prompt", &[], &[]).unwrap();
+        let payload = create_codex_request(&model, "system prompt", &[], &[], None).unwrap();
         let instructions = payload["instructions"].as_str().unwrap();
         assert_eq!(instructions, "system prompt");
     }
