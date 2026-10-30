@@ -557,6 +557,18 @@ impl OpenAiProvider {
                 }
             }
 
+            // Experiential's gateway takes the chosen level as is for every
+            // model; a level fixed in the model's request_params stays (N463).
+            if self.name == "custom_experiential" && !obj.contains_key("reasoning_effort") {
+                if let Some(effort) = model_config.thinking_effort() {
+                    let level = match effort {
+                        ThinkingEffort::Off => "none".to_string(),
+                        other => other.to_string(),
+                    };
+                    obj.insert("reasoning_effort".to_string(), json!(level));
+                }
+            }
+
             if Self::PROVIDERS_NEEDING_REASONING_EFFORT_MAPPING.contains(&self.name.as_str()) {
                 match model_config.thinking_effort() {
                     Some(effort) => {
