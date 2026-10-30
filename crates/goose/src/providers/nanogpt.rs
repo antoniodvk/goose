@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use goose_providers::errors::ProviderError;
-use goose_providers::formats::openai::create_request;
+use goose_providers::formats::openai::{create_request, reasoning_effort_for_thinking_in_catalog};
 use goose_providers::images::ImageFormat;
 use goose_providers::model::ModelConfig;
 use goose_providers::request_log::{start_log, LoggerHandleExt};
@@ -181,7 +181,7 @@ impl Provider for NanoGptProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        let payload = create_request(
+        let mut payload = create_request(
             model_config,
             system,
             messages,
@@ -189,6 +189,20 @@ impl Provider for NanoGptProvider {
             &ImageFormat::OpenAi,
             true,
         )?;
+
+        // create_request sends reasoning_effort only for OpenAI models; NanoGPT
+        // takes it for every reasoning model (N460).
+        if payload.get("reasoning_effort").is_none() && model_config.is_reasoning_model() {
+            if let Some(effort) = model_config.thinking_effort().and_then(|effort| {
+                reasoning_effort_for_thinking_in_catalog(
+                    NANOGPT_PROVIDER_NAME,
+                    &model_config.model_name,
+                    effort,
+                )
+            }) {
+                payload["reasoning_effort"] = serde_json::json!(effort);
+            }
+        }
 
         let mut log = start_log(model_config, &payload)?;
 

@@ -1942,7 +1942,17 @@ pub fn openai_reasoning_effort_for_thinking(
     model_name: &str,
     effort: ThinkingEffort,
 ) -> Option<String> {
-    let catalog = crate::canonical::maybe_get_canonical_model("openai", model_name);
+    reasoning_effort_for_thinking_in_catalog("openai", model_name, effort)
+}
+
+/// Picks the catalog effort level closest to the chosen thinking effort for
+/// `provider`'s entry of `model_name` (N460).
+pub fn reasoning_effort_for_thinking_in_catalog(
+    provider: &str,
+    model_name: &str,
+    effort: ThinkingEffort,
+) -> Option<String> {
+    let catalog = crate::canonical::maybe_get_canonical_model(provider, model_name);
     let catalog_efforts = catalog
         .as_ref()
         .and_then(|model| model.reasoning_efforts.as_deref());
