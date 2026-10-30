@@ -44,19 +44,18 @@ use crate::utils::sanitize_unicode_tags;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, Annotations, AuthMethod, AuthMethodAgent, AuthenticateRequest,
     AuthenticateResponse, BlobResourceContents, CancelNotification, CloseSessionRequest,
-    CloseSessionResponse,
-    ConfigOptionUpdate, ContentBlock, Cost, CurrentModeUpdate, DeleteSessionRequest,
-    DeleteSessionResponse, EmbeddedResourceResource, ForkSessionRequest, ForkSessionResponse,
-    ImageContent, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer,
-    Meta, NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
-    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, SessionCapabilities,
-    SessionCloseCapabilities,
-    SessionConfigOption, SessionDeleteCapabilities, SessionId, SessionInfoUpdate,
-    SessionListCapabilities, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
-    TextContent, ToolCallId, ToolCallUpdate, Usage, UsageUpdate,
+    CloseSessionResponse, ConfigOptionUpdate, ContentBlock, Cost, CurrentModeUpdate,
+    DeleteSessionRequest, DeleteSessionResponse, EmbeddedResourceResource, ForkSessionRequest,
+    ForkSessionResponse, ImageContent, Implementation, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    McpCapabilities, McpServer, Meta, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
+    SessionCapabilities, SessionCloseCapabilities, SessionConfigOption, SessionDeleteCapabilities,
+    SessionId, SessionInfoUpdate, SessionListCapabilities, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, StopReason, TextContent, ToolCallId, ToolCallUpdate, Usage,
+    UsageUpdate,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::util::MatchDispatchFrom;
@@ -623,9 +622,6 @@ fn resolve_default_provider_model_config(
                     .data(format!("Failed to resolve model: {}", error))
             })?;
     Ok((resolved_provider, resolved_model_config))
-}
-
-    })
 }
 
 /// Whether a document of this media type travels through ACP as an embedded
