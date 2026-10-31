@@ -247,17 +247,20 @@ impl Provider for NanoGptProvider {
         // model list declares (N485).
         if model_config.is_reasoning_model() {
             let declared = self.declared_reasoning_efforts(&model_config.model_name);
-            if let Some(effort) = model_config.thinking_effort().and_then(|effort| match &declared
+            if let Some(effort) =
+                model_config
+                    .thinking_effort()
+                    .and_then(|effort| match &declared {
+                        Some(levels) => {
+                            nearest_reasoning_effort(Some(levels), &model_config.model_name, effort)
+                        }
+                        None => reasoning_effort_for_thinking_in_catalog(
+                            NANOGPT_PROVIDER_NAME,
+                            &model_config.model_name,
+                            effort,
+                        ),
+                    })
             {
-                Some(levels) => {
-                    nearest_reasoning_effort(Some(levels), &model_config.model_name, effort)
-                }
-                None => reasoning_effort_for_thinking_in_catalog(
-                    NANOGPT_PROVIDER_NAME,
-                    &model_config.model_name,
-                    effort,
-                ),
-            }) {
                 payload["reasoning_effort"] = serde_json::json!(effort);
             }
         }
