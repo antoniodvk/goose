@@ -751,6 +751,107 @@ async fn wait_for_oauth_code(rx: oneshot::Receiver<Result<String>>) -> Result<St
         .map_err(|e| anyhow!("OAuth callback error: {}", e))
 }
 
+#[derive(Debug, Deserialize)]
+struct DeviceUserCode {
+    device_auth_id: String,
+    #[serde(alias = "usercode")]
+    user_code: String,
+    #[serde(default)]
+    interval: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceAuthGrant {
+    authorization_code: String,
+    code_verifier: String,
+}
+
+const DEVICE_AUTH_TIMEOUT_SECS: u64 = 15 * 60;
+
+/// Sign-in with a device code (same protocol as `codex login --device-auth`):
+/// the user enters the code on the OpenAI page on any device, Goose polls.
+async fn perform_device_flow(auth_state: &ChatGptCodexAuthState) -> Result<TokenData> {
+    let _guard = auth_state.oauth_mutex.try_lock().map_err(|_| {
+        anyhow!("Another OAuth flow is already in progress; please try again later")
+    })?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/accounts/deviceauth/usercode", ISSUER))
+        .json(&json!({ "client_id": CLIENT_ID }))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("Device code request failed ({})", resp.status()));
+    }
+    let device: DeviceUserCode = resp.json().await?;
+    let interval = match &device.interval {
+        Value::String(s) => s.trim().parse::<u64>().ok(),
+        Value::Number(n) => n.as_u64(),
+        _ => None,
+    }
+    .unwrap_or(5)
+    .max(1);
+
+    let verify_url = format!("{}/codex/device", ISSUER);
+    crate::providers::oauth_device_flow::announce_device_code(
+        &device.user_code,
+        &verify_url,
+        DEVICE_AUTH_TIMEOUT_SECS,
+    );
+
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(DEVICE_AUTH_TIMEOUT_SECS);
+    let grant: DeviceAuthGrant = loop {
+        let resp = client
+            .post(format!("{}/api/accounts/deviceauth/token", ISSUER))
+            .json(&json!({
+                "device_auth_id": device.device_auth_id,
+                "user_code": device.user_code,
+            }))
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            break resp.json().await?;
+        }
+        if status != reqwest::StatusCode::FORBIDDEN && status != reqwest::StatusCode::NOT_FOUND {
+            return Err(anyhow!("Device code check failed ({})", status));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!("Device code expired"));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+    };
+
+    let pkce = PkceChallenge {
+        verifier: grant.code_verifier,
+        challenge: String::new(),
+    };
+    let redirect_uri = format!("{}/deviceauth/callback", ISSUER);
+    let tokens = exchange_code_for_tokens_with_issuer(
+        ISSUER,
+        &grant.authorization_code,
+        &redirect_uri,
+        &pkce,
+    )
+    .await?;
+    Ok(token_data_from_tokens(tokens))
+}
+
+fn token_data_from_tokens(tokens: TokenResponse) -> TokenData {
+    let expires_at = Utc::now() + chrono::Duration::seconds(tokens.expires_in.unwrap_or(3600));
+    let mut token_data = TokenData {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        id_token: tokens.id_token,
+        expires_at,
+        account_id: None,
+    };
+    token_data.account_id = extract_account_id(&token_data);
+    token_data
+}
+
 async fn perform_oauth_flow(auth_state: &ChatGptCodexAuthState) -> Result<TokenData> {
     let _guard = auth_state.oauth_mutex.try_lock().map_err(|_| {
         anyhow!("Another OAuth flow is already in progress; please try again later")
@@ -777,19 +878,7 @@ async fn perform_oauth_flow(auth_state: &ChatGptCodexAuthState) -> Result<TokenD
 
     let tokens = exchange_code_for_tokens_with_issuer(ISSUER, &code, &redirect_uri, &pkce).await?;
 
-    let expires_at = Utc::now() + chrono::Duration::seconds(tokens.expires_in.unwrap_or(3600));
-
-    let mut token_data = TokenData {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        id_token: tokens.id_token,
-        expires_at,
-        account_id: None,
-    };
-
-    token_data.account_id = extract_account_id(&token_data);
-
-    Ok(token_data)
+    Ok(token_data_from_tokens(tokens))
 }
 
 #[derive(Debug)]
@@ -1109,9 +1198,14 @@ impl Provider for ChatGptCodexProvider {
         let previous_token = self.auth_provider.cache.load();
         self.auth_provider.clear_cached_tokens();
 
-        let result = perform_oauth_flow(self.auth_provider.state.as_ref())
-            .await
-            .and_then(|token_data| self.auth_provider.cache.save(&token_data));
+        // Started from a remote ACP client (the phone app): device code instead
+        // of the localhost callback, which only works in a browser on this PC.
+        let result = if crate::providers::oauth_device_flow::device_code_announce_active() {
+            perform_device_flow(self.auth_provider.state.as_ref()).await
+        } else {
+            perform_oauth_flow(self.auth_provider.state.as_ref()).await
+        }
+        .and_then(|token_data| self.auth_provider.cache.save(&token_data));
 
         if let Err(e) = result {
             if let Some(previous_token) = previous_token.as_ref() {

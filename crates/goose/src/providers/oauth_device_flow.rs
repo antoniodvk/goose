@@ -28,6 +28,25 @@ where
     DEVICE_CODE_ANNOUNCE.scope(announce, fut).await
 }
 
+/// Hands a device code to the ACP client when one is listening (task-local set
+/// by the ACP server). Returns false when nobody listens, so callers can fall
+/// back to their own flow.
+pub fn device_code_announce_active() -> bool {
+    DEVICE_CODE_ANNOUNCE.try_with(|_| ()).is_ok()
+}
+
+pub fn announce_device_code(user_code: &str, verification_uri: &str, expires_in: u64) -> bool {
+    DEVICE_CODE_ANNOUNCE
+        .try_with(|f| {
+            f(
+                user_code.to_string(),
+                verification_uri.to_string(),
+                expires_in,
+            )
+        })
+        .is_ok()
+}
+
 /// Fallback poll interval when the server omits `interval` (RFC 8628 §3.2).
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
 
