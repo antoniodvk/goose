@@ -932,36 +932,21 @@ impl ChatGptCodexAuthProvider {
         Ok(token_data)
     }
 
-    async fn get_valid_token(&self) -> Result<TokenData> {
-        if let Some(mut token_data) = self.cache.load() {
-            if token_data.expires_at > Utc::now() + chrono::Duration::seconds(60) {
-                return Ok(token_data);
-            }
-
-            tracing::debug!("Token expired, attempting refresh");
-            match self.refresh_token(&mut token_data).await {
-                Ok(()) => {
-                    tracing::info!("Token refreshed successfully");
-                    return Ok(token_data);
-                }
-                Err(e) => {
-                    tracing::warn!("Token refresh failed, will re-authenticate: {}", e);
-                    self.cache.clear();
-                }
-            }
-        }
-
-        tracing::info!("Starting OAuth flow for ChatGPT Codex");
-        let token_data = perform_oauth_flow(self.state.as_ref()).await?;
-        self.cache.save(&token_data)?;
-        Ok(token_data)
+    /// Token for a request. Never starts the interactive OAuth flow: a request
+    /// from the phone must not open a browser on this PC or hold the callback
+    /// port. Without a usable token it fails with a sign-in error, and signing in
+    /// goes through `configure_oauth` (providers/config/authenticate).
+    async fn get_request_token(&self) -> Result<TokenData, ProviderError> {
+        self.get_cached_token()
+            .await
+            .map_err(|e| ProviderError::Authentication(format!("ChatGPT sign-in required: {e}")))
     }
 }
 
 #[async_trait]
 impl AuthProvider for ChatGptCodexAuthProvider {
     async fn get_auth_header(&self) -> Result<(String, String)> {
-        let token_data = self.get_valid_token().await?;
+        let token_data = self.get_request_token().await?;
         Ok((
             "Authorization".to_string(),
             format!("Bearer {}", token_data.access_token),
@@ -1020,11 +1005,7 @@ impl ChatGptCodexProvider {
     }
 
     async fn post_streaming(&self, payload: &Value) -> Result<reqwest::Response, ProviderError> {
-        let token_data = self
-            .auth_provider
-            .get_valid_token()
-            .await
-            .map_err(|e| ProviderError::Authentication(e.to_string()))?;
+        let token_data = self.auth_provider.get_request_token().await?;
 
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(account_id) = &token_data.account_id {
