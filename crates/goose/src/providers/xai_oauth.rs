@@ -592,15 +592,27 @@ async fn perform_device_code_flow() -> Result<TokenData> {
         .verification_uri_complete
         .clone()
         .unwrap_or_else(|| device.verification_uri.clone());
-    tracing::info!(
-        "xAI device authorization: open {} and enter code {}",
-        device.verification_uri,
-        device.user_code
+    let expires_in = device
+        .expires_in
+        .filter(|v| *v > 0)
+        .unwrap_or(DEVICE_CODE_DEFAULT_EXPIRES_SECS);
+    // Started from a remote ACP client (the phone app): the code goes to the client.
+    let announced = crate::providers::oauth_device_flow::announce_device_code(
+        &device.user_code,
+        &url,
+        expires_in,
     );
-    eprintln!(
-        "\nTo authorize goose with xAI, open this URL in any browser:\n  {}\nand enter code: {}\n",
-        url, device.user_code
-    );
+    if !announced {
+        tracing::info!(
+            "xAI device authorization: open {} and enter code {}",
+            device.verification_uri,
+            device.user_code
+        );
+        eprintln!(
+            "\nTo authorize goose with xAI, open this URL in any browser:\n  {}\nand enter code: {}\n",
+            url, device.user_code
+        );
+    }
     let tokens = poll_device_code_token(&device).await?;
     Ok(token_data_from_response(tokens))
 }
@@ -726,10 +738,30 @@ impl Provider for XaiOAuthProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        self.auth_provider.get_valid_token().await?;
+        // Without a usable token the client is told to sign in again (the phone
+        // app shows its sign-in button for this message).
+        self.auth_provider
+            .get_valid_token()
+            .await
+            .map_err(|e| match e {
+                ProviderError::NotConfigured => ProviderError::Authentication(
+                    "Grok sign-in required: not signed in".to_string(),
+                ),
+                ProviderError::Authentication(details) => {
+                    ProviderError::Authentication(format!("Grok sign-in required: {details}"))
+                }
+                other => other,
+            })?;
+        // A token xAI rejects (revoked before its stored expiry) needs a new sign-in too.
         self.inner
             .stream(model_config, system, messages, tools)
             .await
+            .map_err(|e| match e {
+                ProviderError::Authentication(details) => {
+                    ProviderError::Authentication(format!("Grok sign-in required: {details}"))
+                }
+                other => other,
+            })
     }
 
     async fn fetch_supported_models(&self) -> Result<Vec<String>, ProviderError> {
@@ -743,15 +775,25 @@ impl Provider for XaiOAuthProvider {
         let previous_token = self.auth_provider.cache.load();
         self.auth_provider.cache.clear();
 
-        let flow_result = match perform_loopback_oauth_flow(self.auth_provider.state.as_ref()).await
-        {
-            Ok(td) => Ok(td),
-            Err(e) => {
-                tracing::warn!(
-                    "xAI loopback OAuth failed ({}); falling back to device-code flow",
-                    e
-                );
-                perform_device_code_flow().await
+        // Started from a remote ACP client (the phone app): device code instead of
+        // the loopback callback, which only works in a browser on this PC.
+        let flow_result = if crate::providers::oauth_device_flow::device_code_announce_active() {
+            match self.auth_provider.state.oauth_mutex.try_lock() {
+                Ok(_guard) => perform_device_code_flow().await,
+                Err(_) => Err(anyhow!(
+                    "Another xAI OAuth flow is already in progress; please try again later"
+                )),
+            }
+        } else {
+            match perform_loopback_oauth_flow(self.auth_provider.state.as_ref()).await {
+                Ok(td) => Ok(td),
+                Err(e) => {
+                    tracing::warn!(
+                        "xAI loopback OAuth failed ({}); falling back to device-code flow",
+                        e
+                    );
+                    perform_device_code_flow().await
+                }
             }
         };
 

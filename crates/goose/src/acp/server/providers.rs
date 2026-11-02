@@ -1126,9 +1126,9 @@ impl GooseAcpAgent {
                 let provider_id = req.provider_id.clone();
                 let announce: Box<dyn Fn(String, String, u64) + Send + Sync> =
                     Box::new(move |user_code, verification_uri, expires_in| {
-                        // ChatGPT is signed in from the phone: the code goes to the
-                        // client only, not to this PC's clipboard and browser.
-                        if provider_id != "chatgpt_codex" {
+                        // ChatGPT and Grok are signed in from the phone: the code goes to
+                        // the client only, not to this PC's clipboard and browser.
+                        if provider_id != "chatgpt_codex" && provider_id != "xai_oauth" {
                             let _ = arboard::Clipboard::new()
                                 .ok()
                                 .and_then(|mut cb| cb.set_text(&user_code).ok());
