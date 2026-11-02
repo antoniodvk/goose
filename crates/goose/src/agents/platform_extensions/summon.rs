@@ -84,6 +84,13 @@ fn merge_subrecipe_parameters(
     merged
 }
 
+/// One entry of GOOSE_SUBAGENT_AGENT_MODELS: the model a named agent runs on.
+#[derive(Debug, Deserialize)]
+struct AgentModelChoice {
+    provider: String,
+    model: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct AgentMetadata {
     name: String,
@@ -1218,12 +1225,27 @@ impl SummonClient {
                 .map(str::to_string)
         };
 
-        let settings = model.map(|m| Settings {
-            goose_model: Some(m),
-            goose_provider: params.provider.clone(),
-            temperature: params.temperature,
-            max_turns: None,
-        });
+        // A per-agent choice (GOOSE_SUBAGENT_AGENT_MODELS: {"<agent name>": {"provider", "model"}}) wins over both,
+        // so each named agent can run on its own model while Claude Code keeps reading the file's model: (C134).
+        let chosen = Config::global()
+            .get_param::<HashMap<String, AgentModelChoice>>("GOOSE_SUBAGENT_AGENT_MODELS")
+            .ok()
+            .and_then(|mut choices| choices.remove(&source.name));
+
+        let settings = match chosen {
+            Some(choice) => Some(Settings {
+                goose_model: Some(choice.model),
+                goose_provider: Some(choice.provider),
+                temperature: params.temperature,
+                max_turns: None,
+            }),
+            None => model.map(|m| Settings {
+                goose_model: Some(m),
+                goose_provider: params.provider.clone(),
+                temperature: params.temperature,
+                max_turns: None,
+            }),
+        };
 
         let mut builder = Recipe::builder()
             .version("1.0.0")
