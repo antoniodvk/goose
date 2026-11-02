@@ -59,7 +59,16 @@ fn skill_tool() -> Result<Tool> {
     ))
 }
 
+/// Set `GOOSE_NO_SKILL_LIST` to leave skills out of the system prompt and the tool list
+/// (saves the skill-list input tokens on every turn for runs that do not use skills).
+fn skills_disabled() -> bool {
+    std::env::var_os("GOOSE_NO_SKILL_LIST").is_some_and(|value| !value.is_empty())
+}
+
 fn skill_instructions(working_dir: &Path) -> Option<String> {
+    if skills_disabled() {
+        return None;
+    }
     let sources = crate::skills::discover_skills(Some(working_dir));
     let mut skills: Vec<&SourceEntry> = sources
         .iter()
@@ -304,6 +313,9 @@ impl Operation<Session, GooseEffect> for SkillOperation {
     }
 
     async fn inference_tools(&self, _session: &Session) -> Result<Vec<Tool>> {
+        if skills_disabled() {
+            return Ok(Vec::new());
+        }
         Ok(vec![skill_tool()?])
     }
 
