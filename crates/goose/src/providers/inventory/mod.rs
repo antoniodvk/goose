@@ -1084,11 +1084,13 @@ fn enrich_model_ids_with_canonical(
 
     for id in model_ids {
         let model = enriched_model(provider_family, id, None);
-        let dedup_key = if is_databricks_v2_model_service(provider_family, id) {
-            id
-        } else {
-            &model.name
-        };
+        // Every id the provider lists is a model it serves: a dated snapshot such as
+        // `deepseek/deepseek-v4.1-flash-1017` maps to the same canonical name as its base model
+        // but is a distinct model, so collapsing by name would hide it from the inventory.
+        // Only Databricks collapses by name, where `goose-` endpoints are aliases (see below).
+        let collapse_by_name = matches!(provider_family, "databricks" | "databricks_v2")
+            && !is_databricks_v2_model_service(provider_family, id);
+        let dedup_key = if collapse_by_name { &model.name } else { id };
         if !seen_keys.insert(dedup_key.clone()) {
             continue;
         }
@@ -1289,6 +1291,19 @@ mod tests {
             assert_eq!(variant.context_limit, models[0].context_limit);
             assert_eq!(variant.reasoning, models[0].reasoning);
         }
+    }
+
+    #[test]
+    fn inventory_keeps_dated_snapshots_next_to_base_model() {
+        let ids = vec![
+            "deepseek/deepseek-v4.1-flash".to_string(),
+            "deepseek/deepseek-v4.1-flash-1017".to_string(),
+        ];
+        let models = enrich_model_ids_with_canonical("nano-gpt", &ids);
+        assert_eq!(
+            models.iter().map(|model| &model.id).collect::<Vec<_>>(),
+            ids.iter().collect::<Vec<_>>()
+        );
     }
 
     #[test]
