@@ -1994,6 +1994,173 @@
       "x-side": "agent",
       "x-method": "_goose/unstable/providers/supported-models/list"
     },
+    "ProviderUsageRequest_unstable": {
+      "type": "object",
+      "properties": {
+        "providerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId"
+      ],
+      "description": "Read the plan windows and balances of the provider's account from the\nprovider's own account API. `usage` is null for providers without one.",
+      "x-side": "agent",
+      "x-method": "_goose/unstable/providers/usage"
+    },
+    "ProviderUsageResponse_unstable": {
+      "type": "object",
+      "properties": {
+        "providerId": {
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderAccountUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "providerId"
+      ],
+      "x-side": "agent",
+      "x-method": "_goose/unstable/providers/usage"
+    },
+    "ProviderAccountUsage": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The provider's own plan name, when the account API reports one."
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderUsageWindow"
+          }
+        },
+        "balances": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderUsageBalance"
+          }
+        },
+        "fetchedAt": {
+          "type": "integer",
+          "description": "Unix time in milliseconds when goose asked the provider."
+        }
+      },
+      "required": [
+        "windows",
+        "balances",
+        "fetchedAt"
+      ]
+    },
+    "ProviderUsageWindow": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The provider's own name for the window (for example `primary`, `dailyInputTokens`)."
+        },
+        "usedPercent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "0 to 100 (may exceed 100); null when the provider reports \"unknown\"."
+        },
+        "resetsAt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Unix time in milliseconds."
+        },
+        "windowSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "used": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "limit": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`tokens`, `images`, `usd` or `credits`."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "description": "One allowance window of a plan."
+    },
+    "ProviderUsageBalance": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "number",
+          "format": "double"
+        },
+        "currency": {
+          "$ref": "#/$defs/ProviderUsageCurrency"
+        },
+        "granted": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "What the balance started from, when the provider reports it."
+        },
+        "expiresAt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Unix time in milliseconds."
+        }
+      },
+      "required": [
+        "id",
+        "amount",
+        "currency"
+      ]
+    },
+    "ProviderUsageCurrency": {
+      "type": "string",
+      "enum": [
+        "USD",
+        "credits"
+      ]
+    },
     "ProviderCatalogListRequest_unstable": {
       "type": "object",
       "properties": {
@@ -7345,6 +7512,15 @@
                 {
                   "allOf": [
                     {
+                      "$ref": "#/$defs/ProviderUsageRequest_unstable"
+                    }
+                  ],
+                  "description": "Params for _goose/unstable/providers/usage",
+                  "title": "ProviderUsageRequest_unstable"
+                },
+                {
+                  "allOf": [
+                    {
                       "$ref": "#/$defs/ProviderCatalogListRequest_unstable"
                     }
                   ],
@@ -8278,6 +8454,14 @@
                         }
                       ],
                       "title": "ProviderSupportedModelsListResponse_unstable"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/$defs/ProviderUsageResponse_unstable"
+                        }
+                      ],
+                      "title": "ProviderUsageResponse_unstable"
                     },
                     {
                       "allOf": [

@@ -23,6 +23,7 @@ use crate::openai_compatible::{handle_status, stream_openai_compat};
 use crate::openrouter_format;
 use crate::request_log::{start_log, LoggerHandleExt};
 use crate::retry::ProviderRetry;
+use crate::usage::{parse_openrouter_key, AccountUsage};
 use rmcp::model::Tool;
 
 pub const OPENROUTER_PROVIDER_NAME: &str = "openrouter";
@@ -563,6 +564,14 @@ impl Provider for OpenRouterProvider {
         true
     }
 
+    /// `GET /api/v1/key`: the limit of this key, if one is set.
+    async fn fetch_usage(&self) -> Result<Option<AccountUsage>, ProviderError> {
+        let response = self.api_client.request("api/v1/key").response_get().await?;
+        let response = handle_status(response).await?;
+        let payload: Value = read_json_response(response).await?;
+        parse_openrouter_key(&payload).map(Some)
+    }
+
     async fn get_known_context_limit(
         &self,
         model: &str,
@@ -925,6 +934,47 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn fetch_usage_reads_the_key_limit() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/key"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "limit": 4.0, "limit_remaining": 1.0, "is_free_tier": false, "budgets": [] }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let usage = provider_for(&server).fetch_usage().await.unwrap().unwrap();
+
+        assert_eq!(usage.windows[0].used_percent, Some(75.0));
+        assert_eq!(usage.balances[0].amount, 1.0);
+    }
+
+    #[tokio::test]
+    async fn fetch_usage_maps_a_rejected_key_to_authentication() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/key"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "error": { "message": "No auth credentials found" }
+            })))
+            .mount(&server)
+            .await;
+
+        let error = provider_for(&server).fetch_usage().await.unwrap_err();
+
+        assert!(matches!(error, ProviderError::Authentication(_)));
     }
 
     #[tokio::test]

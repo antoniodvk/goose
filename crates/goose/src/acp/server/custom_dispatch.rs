@@ -254,6 +254,14 @@ impl GooseAcpAgent {
         self.on_list_provider_supported_models(req).await
     }
 
+    #[custom_method(ProviderUsageRequest)]
+    async fn dispatch_provider_usage(
+        &self,
+        req: ProviderUsageRequest,
+    ) -> Result<ProviderUsageResponse, agent_client_protocol::Error> {
+        self.on_provider_usage(req).await
+    }
+
     #[custom_method(ProviderCatalogListRequest)]
     async fn dispatch_list_provider_catalog(
         &self,

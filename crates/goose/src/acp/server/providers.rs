@@ -7,6 +7,63 @@ use std::str::FromStr;
 
 const ACP_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// A failed read-only query against the provider's API: a rejected sign-in is
+/// `auth_required`, a provider that is not set up `invalid_params`, the rest
+/// `internal_error`.
+fn provider_query_error(
+    provider_id: &str,
+    what: &str,
+    error: goose_providers::errors::ProviderError,
+) -> agent_client_protocol::Error {
+    match error {
+        goose_providers::errors::ProviderError::Authentication(error) => {
+            agent_client_protocol::Error::auth_required().data(error)
+        }
+        goose_providers::errors::ProviderError::NotConfigured => {
+            agent_client_protocol::Error::invalid_params()
+                .data(format!("Provider is not configured: {provider_id}"))
+        }
+        error => agent_client_protocol::Error::internal_error()
+            .data(format!("Failed to fetch {what}: {error}")),
+    }
+}
+
+fn account_usage_to_dto(usage: goose_providers::usage::AccountUsage) -> ProviderAccountUsage {
+    use goose_providers::usage::UsageCurrency;
+
+    ProviderAccountUsage {
+        plan: usage.plan,
+        windows: usage
+            .windows
+            .into_iter()
+            .map(|window| ProviderUsageWindow {
+                id: window.id,
+                used_percent: window.used_percent,
+                resets_at: window.resets_at,
+                window_seconds: window.window_seconds,
+                used: window.used,
+                limit: window.limit,
+                unit: window.unit,
+            })
+            .collect(),
+        balances: usage
+            .balances
+            .into_iter()
+            .map(|balance| ProviderUsageBalance {
+                id: balance.id,
+                amount: balance.amount,
+                currency: match balance.currency {
+                    UsageCurrency::Usd => ProviderUsageCurrency::Usd,
+                    UsageCurrency::Credits => ProviderUsageCurrency::Credits,
+                },
+                granted: balance.granted,
+                expires_at: balance.expires_at,
+            })
+            .collect(),
+        fetched_at: chrono::Utc::now().timestamp_millis(),
+    }
+}
+
 fn provider_secret_to_dto(secret: provider_secrets::ProviderSecret) -> ProviderSecretDto {
     let storage = match secret.storage {
         provider_secrets::ProviderSecretStorage::SecretStore => {
@@ -507,25 +564,32 @@ impl GooseAcpAgent {
             .create_provider(&req.provider_id)
             .await
             .internal_err_ctx("Failed to initialize provider")?;
-        let models = match provider.fetch_supported_models().await {
-            Ok(models) => models,
-            Err(goose_providers::errors::ProviderError::Authentication(error)) => {
-                return Err(agent_client_protocol::Error::auth_required().data(error));
-            }
-            Err(goose_providers::errors::ProviderError::NotConfigured) => {
-                return Err(agent_client_protocol::Error::invalid_params()
-                    .data(format!("Provider is not configured: {}", req.provider_id)));
-            }
-            Err(error) => {
-                return Err(agent_client_protocol::Error::internal_error().data(format!(
-                    "Failed to fetch provider supported models: {error}"
-                )));
-            }
-        };
+        let models = provider.fetch_supported_models().await.map_err(|error| {
+            provider_query_error(&req.provider_id, "provider supported models", error)
+        })?;
 
         Ok(ProviderSupportedModelsListResponse {
             provider_id: req.provider_id,
             models,
+        })
+    }
+
+    pub(super) async fn on_provider_usage(
+        &self,
+        req: ProviderUsageRequest,
+    ) -> Result<ProviderUsageResponse, agent_client_protocol::Error> {
+        let provider = self
+            .create_provider(&req.provider_id)
+            .await
+            .internal_err_ctx("Failed to initialize provider")?;
+        let usage = provider
+            .fetch_usage()
+            .await
+            .map_err(|error| provider_query_error(&req.provider_id, "provider usage", error))?;
+
+        Ok(ProviderUsageResponse {
+            provider_id: req.provider_id,
+            usage: usage.map(account_usage_to_dto),
         })
     }
 
@@ -1263,7 +1327,71 @@ impl GooseAcpAgent {
 
 #[cfg(test)]
 mod tests {
-    use super::mask_secret_value;
+    use super::{account_usage_to_dto, mask_secret_value, provider_query_error};
+    use goose_providers::errors::ProviderError;
+    use goose_providers::usage::{AccountUsage, UsageBalance, UsageCurrency, UsageWindow};
+
+    #[test]
+    fn usage_dto_serializes_the_documented_shape() {
+        let usage = AccountUsage {
+            plan: Some("plus".to_string()),
+            windows: vec![
+                UsageWindow {
+                    id: "primary".to_string(),
+                    used_percent: Some(42.0),
+                    resets_at: Some(1_788_652_800_000),
+                    window_seconds: Some(18_000),
+                    ..Default::default()
+                },
+                UsageWindow {
+                    id: "dailyInputTokens".to_string(),
+                    used_percent: None,
+                    unit: Some("tokens".to_string()),
+                    ..Default::default()
+                },
+            ],
+            balances: vec![UsageBalance {
+                id: "credits".to_string(),
+                amount: 9.99,
+                currency: UsageCurrency::Credits,
+                granted: None,
+                expires_at: None,
+            }],
+        };
+
+        let json = serde_json::to_value(account_usage_to_dto(usage)).unwrap();
+
+        assert_eq!(json["plan"], "plus");
+        assert_eq!(json["windows"][0]["usedPercent"], 42.0);
+        assert_eq!(json["windows"][0]["resetsAt"], 1_788_652_800_000_i64);
+        assert_eq!(json["windows"][0]["windowSeconds"], 18_000);
+        // "Unknown" stays a present null, not a missing field.
+        assert!(json["windows"][1]["usedPercent"].is_null());
+        assert!(json["windows"][1].get("usedPercent").is_some());
+        assert!(json["windows"][1].get("resetsAt").is_none());
+        assert_eq!(json["balances"][0]["currency"], "credits");
+        assert_eq!(json["balances"][0]["amount"], 9.99);
+        assert!(json["fetchedAt"].as_i64().unwrap() > 0);
+    }
+
+    #[test]
+    fn provider_query_errors_map_like_the_model_list() {
+        let code = |error: ProviderError| {
+            serde_json::to_value(provider_query_error("p", "provider usage", error)).unwrap()
+        };
+
+        assert_eq!(
+            code(ProviderError::Authentication("no".to_string()))["code"],
+            -32000
+        );
+        assert_eq!(code(ProviderError::NotConfigured)["code"], -32602);
+        let other = code(ProviderError::RequestFailed("boom".to_string()));
+        assert_eq!(other["code"], -32603);
+        assert!(other["data"]
+            .as_str()
+            .unwrap()
+            .starts_with("Failed to fetch provider usage:"));
+    }
 
     #[test]
     fn mask_secret_value_hides_suffix_and_never_reveals_majority() {

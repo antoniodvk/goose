@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
+use goose_providers::usage::{parse_grok_billing, AccountUsage};
 use rmcp::model::Tool;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -65,6 +66,16 @@ const DEVICE_CODE_DEFAULT_EXPIRES_SECS: u64 = 5 * 60;
 
 const XAI_OAUTH_PROVIDER_NAME: &str = "xai_oauth";
 const XAI_OAUTH_DOC_URL: &str = "https://x.ai/grok";
+
+// Credits and usage of the signed-in account, as the Grok CLI asks for them.
+// xai-org/grok-build: `xai-grok-env/src/registry.rs` (cli_chat_proxy_base_url),
+// `xai-grok-shell/src/extensions/billing.rs` (`{base}/billing?format=credits`).
+const XAI_BILLING_ENDPOINT: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+// `xai-grok-shell/src/agent/proxy_headers.rs`: the proxy's auth middleware wants
+// `X-XAI-Token-Auth: xai-grok-cli`, and its version gate `x-grok-client-version`.
+// The value is the version of the `xai-grok-version` crate in the same repository.
+const XAI_PROXY_TOKEN_AUTH: &str = "xai-grok-cli";
+const XAI_PROXY_CLIENT_VERSION: &str = "1.0.45";
 
 #[derive(Debug)]
 struct XaiAuthState {
@@ -706,6 +717,59 @@ impl AuthProvider for XaiOAuthAuthProvider {
     }
 }
 
+/// The `sub` claim of a JWT: the account id the Grok CLI sends as `x-userid`
+/// (`xai-grok-login/src/device_code.rs` takes it from the id token). The
+/// signature is not checked; the value is only echoed to the issuer's proxy.
+fn jwt_subject(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()?
+        .get("sub")?
+        .as_str()
+        .filter(|sub| !sub.is_empty())
+        .map(str::to_string)
+}
+
+/// `GET {proxy}/billing?format=credits`; see
+/// `goose_providers::usage::parse_grok_billing` for the response sources.
+/// Not verified with goose's own token: any non-success status is reported
+/// with its code and nothing is guessed.
+async fn fetch_usage_with_token(
+    billing_endpoint: &str,
+    token_data: &TokenData,
+) -> Result<AccountUsage, ProviderError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(
+            super::base::DEFAULT_CONNECT_TIMEOUT_SECS,
+        ))
+        .timeout(std::time::Duration::from_secs(
+            super::base::DEFAULT_PROVIDER_TIMEOUT_SECS,
+        ))
+        .build()
+        .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
+
+    let mut request = client
+        .get(billing_endpoint)
+        .bearer_auth(&token_data.access_token)
+        .header("X-XAI-Token-Auth", XAI_PROXY_TOKEN_AUTH)
+        .header("x-grok-client-version", XAI_PROXY_CLIENT_VERSION);
+    if let Some(user_id) = token_data.id_token.as_deref().and_then(jwt_subject) {
+        request = request.header("x-userid", user_id);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+    let response = super::openai_compatible::handle_status(response).await?;
+    let payload: serde_json::Value =
+        goose_providers::http_status::read_json_response(response).await?;
+    parse_grok_billing(&payload)
+}
+
 /// Delegating Provider that forwards chat/stream/etc. to an inner
 /// `OpenAiCompatibleProvider` pointed at `https://api.x.ai/v1`, but overrides
 /// `configure_oauth` so the desktop "Sign in" button (and any other caller of
@@ -767,6 +831,13 @@ impl Provider for XaiOAuthProvider {
     async fn fetch_supported_models(&self) -> Result<Vec<String>, ProviderError> {
         self.auth_provider.get_valid_token().await?;
         self.inner.fetch_supported_models().await
+    }
+
+    async fn fetch_usage(&self) -> Result<Option<AccountUsage>, ProviderError> {
+        let token_data = self.auth_provider.get_valid_token().await?;
+        fetch_usage_with_token(XAI_BILLING_ENDPOINT, &token_data)
+            .await
+            .map(Some)
     }
 
     async fn configure_oauth(&self) -> Result<(), ProviderError> {
@@ -942,6 +1013,97 @@ mod tests {
             s
         );
         assert!(s.ends_with("tokens.json"));
+    }
+
+    fn jwt_with_payload(payload: &str) -> String {
+        let encode = |text: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+        format!(
+            "{}.{}.signature",
+            encode(r#"{"alg":"none"}"#),
+            encode(payload)
+        )
+    }
+
+    #[test]
+    fn jwt_subject_reads_the_sub_claim() {
+        assert_eq!(
+            jwt_subject(&jwt_with_payload(r#"{"sub":"user-1","exp":1}"#)).as_deref(),
+            Some("user-1")
+        );
+        assert_eq!(jwt_subject(&jwt_with_payload(r#"{"exp":1}"#)), None);
+        assert_eq!(jwt_subject(&jwt_with_payload(r#"{"sub":""}"#)), None);
+        assert_eq!(jwt_subject("not-a-jwt"), None);
+    }
+
+    fn billing_token(id_token: Option<String>) -> TokenData {
+        TokenData {
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            id_token,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn billing_is_read_with_the_proxy_headers_of_the_grok_cli() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/billing"))
+            .and(query_param("format", "credits"))
+            .and(header("authorization", "Bearer access-token"))
+            .and(header("x-xai-token-auth", "xai-grok-cli"))
+            .and(header("x-grok-client-version", XAI_PROXY_CLIENT_VERSION))
+            .and(header("x-userid", "user-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "config": {
+                    "creditUsagePercent": 42.5,
+                    "currentPeriod": {
+                        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                        "start": "2026-06-01T00:00:00Z",
+                        "end": "2026-06-08T00:00:00Z"
+                    },
+                    "prepaidBalance": { "val": 1250 }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id_token = jwt_with_payload(r#"{"sub":"user-1"}"#);
+        let usage = fetch_usage_with_token(
+            &format!("{}/v1/billing?format=credits", server.uri()),
+            &billing_token(Some(id_token)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(usage.windows[0].used_percent, Some(42.5));
+        assert_eq!(usage.balances[0].amount, 12.5);
+    }
+
+    #[tokio::test]
+    async fn billing_failure_names_the_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/billing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let error = fetch_usage_with_token(
+            &format!("{}/v1/billing?format=credits", server.uri()),
+            &billing_token(None),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(&error, ProviderError::RequestFailed(message) if message.contains("404")));
     }
 
     #[tokio::test]

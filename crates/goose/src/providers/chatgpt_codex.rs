@@ -19,6 +19,7 @@ use futures::{StreamExt, TryStreamExt};
 use goose_providers::errors::ProviderError;
 use goose_providers::formats::openai_responses::responses_api_to_streaming_message;
 use goose_providers::model::ModelConfig;
+use goose_providers::usage::{parse_chatgpt_usage, AccountUsage};
 use rmcp::model::{ContentBlock, Role, Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -37,6 +38,8 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ISSUER: &str = "https://auth.openai.com";
 const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex";
 const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
+// openai/codex `backend-client`: `PathStyle::ChatGptApi` => `{base_url}/wham/usage`.
+const CHATGPT_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 const OAUTH_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
 // Canonical localhost callback port for Codex OAuth (default localhost:1455 per OpenAI docs).
 // https://developers.openai.com/codex/auth/
@@ -1078,6 +1081,36 @@ async fn fetch_catalog_with_token(
     Ok(models.into_iter().map(|model| model.slug).collect())
 }
 
+/// `GET /wham/usage` with the account of the token (see
+/// `goose_providers::usage::parse_chatgpt_usage` for the sources).
+async fn fetch_usage_with_token(
+    usage_endpoint: &str,
+    token_data: &TokenData,
+) -> Result<AccountUsage, ProviderError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(
+            DEFAULT_PROVIDER_TIMEOUT_SECS,
+        ))
+        .build()
+        .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
+
+    let mut request = client
+        .get(usage_endpoint)
+        .bearer_auth(&token_data.access_token);
+    if let Some(account_id) = &token_data.account_id {
+        request = request.header("chatgpt-account-id", account_id);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+    let response = handle_status(response).await?;
+    let payload: Value = goose_providers::http_status::read_json_response(response).await?;
+    parse_chatgpt_usage(&payload)
+}
+
 impl goose_providers::base::ProviderDescriptor for ChatGptCodexProvider {
     fn metadata() -> ProviderMetadata {
         ProviderMetadata::new(
@@ -1205,6 +1238,13 @@ impl Provider for ChatGptCodexProvider {
 
     async fn fetch_supported_models(&self) -> Result<Vec<String>, ProviderError> {
         self.fetch_catalog().await
+    }
+
+    async fn fetch_usage(&self) -> Result<Option<AccountUsage>, ProviderError> {
+        let token_data = self.auth_provider.get_request_token().await?;
+        fetch_usage_with_token(CHATGPT_USAGE_ENDPOINT, &token_data)
+            .await
+            .map(Some)
     }
 }
 
@@ -1795,6 +1835,70 @@ mod tests {
         let models = provider.fetch_supported_models().await.unwrap();
 
         assert_eq!(models, vec!["gpt-6.1-sol".to_string()]);
+    }
+
+    fn usage_token() -> TokenData {
+        TokenData {
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            id_token: None,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            account_id: Some("account-1".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_is_read_with_the_account_of_the_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/wham/usage"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer access-token",
+            ))
+            .and(wiremock::matchers::header(
+                "chatgpt-account-id",
+                "account-1",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "plan_type": "plus",
+                "rate_limit": {
+                    "allowed": true,
+                    "limit_reached": false,
+                    "primary_window": {
+                        "used_percent": 42,
+                        "limit_window_seconds": 18000,
+                        "reset_after_seconds": 100,
+                        "reset_at": 1788652800
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let usage = fetch_usage_with_token(&format!("{}/wham/usage", server.uri()), &usage_token())
+            .await
+            .unwrap();
+
+        assert_eq!(usage.plan.as_deref(), Some("plus"));
+        assert_eq!(usage.windows[0].used_percent, Some(42.0));
+    }
+
+    #[tokio::test]
+    async fn usage_maps_a_rejected_token_to_authentication() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/wham/usage"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let error = fetch_usage_with_token(&format!("{}/wham/usage", server.uri()), &usage_token())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::Authentication(_)));
     }
 
     #[tokio::test]

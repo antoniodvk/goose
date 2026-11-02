@@ -1743,6 +1743,82 @@ pub struct ProviderSupportedModelsListResponse {
     pub models: Vec<String>,
 }
 
+/// Read the plan windows and balances of the provider's account from the
+/// provider's own account API. `usage` is null for providers without one.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
+#[request(
+    method = "_goose/unstable/providers/usage",
+    response = ProviderUsageResponse
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageRequest {
+    pub provider_id: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageResponse {
+    pub provider_id: String,
+    pub usage: Option<ProviderAccountUsage>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAccountUsage {
+    /// The provider's own plan name, when the account API reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    pub windows: Vec<ProviderUsageWindow>,
+    pub balances: Vec<ProviderUsageBalance>,
+    /// Unix time in milliseconds when goose asked the provider.
+    pub fetched_at: i64,
+}
+
+/// One allowance window of a plan.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageWindow {
+    /// The provider's own name for the window (for example `primary`, `dailyInputTokens`).
+    pub id: String,
+    /// 0 to 100 (may exceed 100); null when the provider reports "unknown".
+    pub used_percent: Option<f64>,
+    /// Unix time in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f64>,
+    /// `tokens`, `images`, `usd` or `credits`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ProviderUsageCurrency {
+    #[default]
+    #[serde(rename = "USD")]
+    Usd,
+    #[serde(rename = "credits")]
+    Credits,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageBalance {
+    pub id: String,
+    pub amount: f64,
+    pub currency: ProviderUsageCurrency,
+    /// What the balance started from, when the provider reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted: Option<f64>,
+    /// Unix time in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
 /// Trigger a background refresh of provider inventories.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
 #[request(

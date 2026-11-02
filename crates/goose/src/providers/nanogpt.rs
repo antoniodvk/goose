@@ -10,9 +10,11 @@ use goose_providers::errors::ProviderError;
 use goose_providers::formats::openai::{
     create_request, nearest_reasoning_effort, reasoning_effort_for_thinking_in_catalog,
 };
+use goose_providers::http_status::read_json_response;
 use goose_providers::images::ImageFormat;
 use goose_providers::model::ModelConfig;
 use goose_providers::request_log::{start_log, LoggerHandleExt};
+use goose_providers::usage::{parse_nanogpt_usage, AccountUsage};
 use rmcp::model::Tool;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -21,6 +23,7 @@ pub const NANOGPT_PROVIDER_NAME: &str = "nano-gpt";
 pub const NANOGPT_API_HOST: &str = "https://nano-gpt.com/api/v1";
 pub const NANOGPT_SUBSCRIPTION_HOST: &str = "https://nano-gpt.com/api/subscription/v1";
 pub const NANOGPT_DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4.6";
+const NANOGPT_ACCOUNT_HOST: &str = "https://nano-gpt.com/api";
 pub const NANOGPT_DOC_URL: &str = "https://docs.nano-gpt.com/";
 const NANOGPT_API_KEY: &str = "NANOGPT_API_KEY";
 
@@ -33,9 +36,39 @@ pub struct NanoGptProvider {
     /// `reasoning_efforts` per model from NanoGPT's own model list (N485).
     #[serde(skip)]
     reasoning_efforts: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// For the account endpoints, which sit on other hosts than `api_client`.
+    #[serde(skip)]
+    api_key: String,
+    #[serde(skip)]
+    tls_config: Option<crate::providers::api_client::TlsConfig>,
 }
 
 impl NanoGptProvider {
+    /// Subscription quotas (`GET subscription/v1/usage`, inference key) and the
+    /// cash balance (`POST check-balance`, `x-api-key`), see
+    /// `goose_providers::usage::parse_nanogpt_usage` for the sources.
+    async fn fetch_account_usage(
+        api_key: &str,
+        tls_config: Option<crate::providers::api_client::TlsConfig>,
+        subscription_host: &str,
+        account_host: &str,
+    ) -> Result<AccountUsage, ProviderError> {
+        let subscription = Self::build_client(subscription_host, api_key, tls_config.clone())?
+            .response_get("usage")
+            .await?;
+        let subscription: serde_json::Value =
+            read_json_response(handle_status(subscription).await?).await?;
+
+        // The documentation names no request body for check-balance.
+        let balance = Self::build_client(account_host, api_key, tls_config)?
+            .with_header("x-api-key", api_key)?
+            .response_post("check-balance", &serde_json::json!({}))
+            .await?;
+        let balance: serde_json::Value = read_json_response(handle_status(balance).await?).await?;
+
+        parse_nanogpt_usage(&subscription, &balance)
+    }
+
     fn build_client(
         host: &str,
         api_key: &str,
@@ -150,13 +183,15 @@ impl NanoGptProvider {
             NANOGPT_API_HOST.to_string()
         };
 
-        let api_client = Self::build_client(&host, &api_key, tls_config)?
+        let api_client = Self::build_client(&host, &api_key, tls_config.clone())?
             .with_request_builder(crate::session_context::session_id_request_builder());
 
         let provider = Self {
             api_client,
             name: NANOGPT_PROVIDER_NAME.to_string(),
             reasoning_efforts: Arc::default(),
+            api_key,
+            tls_config,
         };
         // The chat's effort menu is built from this list; without it goose
         // falls back to its catalog.
@@ -220,6 +255,17 @@ impl Provider for NanoGptProvider {
 
         models.sort();
         Ok(models)
+    }
+
+    async fn fetch_usage(&self) -> Result<Option<AccountUsage>, ProviderError> {
+        Self::fetch_account_usage(
+            &self.api_key,
+            self.tls_config.clone(),
+            NANOGPT_SUBSCRIPTION_HOST,
+            NANOGPT_ACCOUNT_HOST,
+        )
+        .await
+        .map(Some)
     }
 
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
@@ -291,6 +337,76 @@ impl Provider for NanoGptProvider {
 mod tests {
     use super::*;
     use goose_providers::base::ProviderDescriptor as _;
+
+    #[tokio::test]
+    async fn account_usage_combines_subscription_quotas_and_balance() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/subscription/v1/usage"))
+            .and(header("authorization", "Bearer nano-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "active": true,
+                "state": "active",
+                "limits": { "dailyInputTokens": 1000000, "weeklyInputTokens": null, "dailyImages": null },
+                "dailyInputTokens": { "used": 250000, "remaining": 750000, "percentUsed": 0.25, "resetAt": 1788652800000_i64 },
+                "weeklyInputTokens": null,
+                "dailyImages": null,
+                "period": { "currentPeriodEnd": null }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/check-balance"))
+            .and(header("x-api-key", "nano-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "usd_balance": "129.46956147", "nano_balance": "26.71801147"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let usage = NanoGptProvider::fetch_account_usage(
+            "nano-key",
+            None,
+            &format!("{}/api/subscription/v1", server.uri()),
+            &format!("{}/api", server.uri()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(usage.windows[0].used_percent, Some(25.0));
+        assert_eq!(usage.balances[0].amount, 129.46956147);
+    }
+
+    #[tokio::test]
+    async fn account_usage_maps_a_rejected_key_to_authentication() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/subscription/v1/usage"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": { "message": "invalid_api_key" }
+            })))
+            .mount(&server)
+            .await;
+
+        let error = NanoGptProvider::fetch_account_usage(
+            "wrong",
+            None,
+            &format!("{}/api/subscription/v1", server.uri()),
+            &format!("{}/api", server.uri()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ProviderError::Authentication(_)));
+    }
 
     #[test]
     fn test_metadata() {

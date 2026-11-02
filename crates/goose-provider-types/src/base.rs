@@ -23,6 +23,7 @@ use crate::{
     permission::PermissionConfirmation,
     retry::RetryConfig,
     thinking::ThinkingEffortSupport,
+    usage::AccountUsage,
 };
 
 /// Metadata about a provider's configuration requirements and capabilities
@@ -599,6 +600,12 @@ pub trait Provider: MaybeSend + MaybeSync {
 
     async fn fetch_supported_models(&self) -> Result<Vec<String>, ProviderError> {
         Ok(vec![])
+    }
+
+    /// The account's plan windows and balances as the provider's own account
+    /// API reports them. `Ok(None)`: the provider has no such query.
+    async fn fetch_usage(&self) -> Result<Option<AccountUsage>, ProviderError> {
+        Ok(None)
     }
 
     async fn fetch_supported_model_info(&self) -> Result<Vec<ModelInfo>, ProviderError> {

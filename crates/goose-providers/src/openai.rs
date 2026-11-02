@@ -26,6 +26,7 @@ use crate::openai_compatible::{
 };
 use crate::request_log::{start_log, LoggerHandleExt};
 use crate::thinking::ThinkingEffort;
+use crate::usage::{parse_experiential_credits, AccountUsage};
 use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -45,6 +46,14 @@ const OPEN_AI_DEFAULT_RESPONSES_PATH: &str = "v1/responses";
 const OPEN_AI_DEFAULT_MODELS_PATH: &str = "v1/models";
 const N_CTX_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const N_CTX_FAILURE_TTL: Duration = Duration::from_secs(60);
+const EXPERIENTIAL_HOST: &str = "api.experientiallabs.ai";
+
+fn is_experiential_host(host: &str) -> bool {
+    url::Url::parse(host)
+        .ok()
+        .and_then(|url| url.host_str().map(|name| name == EXPERIENTIAL_HOST))
+        .unwrap_or(false)
+}
 
 #[derive(Debug, Clone, Copy)]
 enum CachedContextLimit {
@@ -625,6 +634,19 @@ impl OpenAiProvider {
         }
     }
 
+    /// `GET /api/v1/credits` on the Experiential gateway; the path is absolute
+    /// because the provider's host carries the `/v1` inference prefix.
+    async fn fetch_experiential_credits(&self) -> Result<AccountUsage, ProviderError> {
+        let response = self
+            .api_client
+            .request("/api/v1/credits")
+            .response_get()
+            .await?;
+        let response = handle_status(response).await?;
+        let payload: serde_json::Value = read_json_response(response).await?;
+        parse_experiential_credits(&payload)
+    }
+
     async fn fetch_models_from_api(&self) -> Result<Vec<String>, ProviderError> {
         let models_path =
             Self::map_base_path(&self.base_path, "models", OPEN_AI_DEFAULT_MODELS_PATH);
@@ -848,6 +870,15 @@ impl Provider for OpenAiProvider {
         }
 
         self.fetch_models_from_api().await
+    }
+
+    /// Only Experiential Labs has an account endpoint among the providers this
+    /// type serves; the endpoint belongs to that service, not to the protocol.
+    async fn fetch_usage(&self) -> Result<Option<AccountUsage>, ProviderError> {
+        if !is_experiential_host(self.api_client.host()) {
+            return Ok(None);
+        }
+        self.fetch_experiential_credits().await.map(Some)
     }
 
     async fn fetch_supported_model_info(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -1870,6 +1901,49 @@ mod tests {
             .await
             .expect("should fall back");
         assert_eq!(models, predefined);
+    }
+
+    #[test]
+    fn only_the_experiential_gateway_counts_as_experiential_host() {
+        assert!(is_experiential_host("https://api.experientiallabs.ai/v1"));
+        assert!(!is_experiential_host("https://api.openai.com/v1"));
+        assert!(!is_experiential_host(
+            "https://experientiallabs.ai.example/v1"
+        ));
+        assert!(!is_experiential_host("not a url"));
+    }
+
+    #[tokio::test]
+    async fn other_hosts_have_no_usage_query() {
+        let provider = make_provider("custom_other");
+
+        assert_eq!(provider.fetch_usage().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn experiential_credits_are_read_from_the_absolute_account_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/credits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "total_credits": 5.0, "total_usage": 1.5 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The inference host carries the /v1 prefix, as the real one does.
+        let provider = make_provider_with_custom_models(
+            &format!("{}/v1", server.uri()),
+            "chat/completions",
+            vec![],
+        );
+
+        let usage = provider.fetch_experiential_credits().await.unwrap();
+
+        assert_eq!(usage.balances[0].amount, 3.5);
     }
 
     #[tokio::test]
