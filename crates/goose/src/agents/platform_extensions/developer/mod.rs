@@ -135,7 +135,7 @@ impl DeveloperClient {
             )),
             Tool::new(
                 "edit".to_string(),
-                "Edit a file by finding and replacing text. The before text must match exactly and uniquely. Use empty after text to delete.".to_string(),
+                "Edit a file by finding and replacing text. The before text must match exactly and uniquely, unless replace_all is true, which replaces every occurrence. Use empty after text to delete.".to_string(),
                 Self::schema::<FileEditParams>(),
             )
             .annotate(ToolAnnotations::from_raw(
@@ -159,7 +159,9 @@ impl DeveloperClient {
                      (set GOOSE_SHELL to override) - write command strings in that shell's \
                      syntax.{newline_note} Returns an object with stdout and stderr as separate \
                      fields. The output of each stream is limited to up to 2000 lines, and \
-                     longer outputs will be saved to a temporary file.",
+                     longer outputs will be saved to a temporary file. A command is killed \
+                     after 300 seconds unless timeout_secs is set; use timeout_secs for long \
+                     builds or tests, and 0 for no limit.",
                 );
                 Tool::new("shell".to_string(), description, Self::schema::<ShellParams>())
             }
@@ -173,7 +175,7 @@ impl DeveloperClient {
             )),
             Tool::new(
                 "tree".to_string(),
-                "List a directory tree with line counts. Traversal respects .gitignore rules.".to_string(),
+                "List a directory tree with line counts. Includes hidden directories such as .claude and .github (not .git). Traversal respects .gitignore rules. Output is limited; use a smaller depth or a subdirectory for more.".to_string(),
                 Self::schema::<TreeParams>(),
             )
             .annotate(ToolAnnotations::from_raw(

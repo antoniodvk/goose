@@ -31,6 +31,9 @@ pub struct FileEditParams {
     pub path: String,
     pub before: String,
     pub after: String,
+    /// Replace every occurrence of `before` instead of requiring a unique match.
+    #[serde(default)]
+    pub replace_all: bool,
 }
 
 pub struct EditTools;
@@ -133,14 +136,22 @@ impl EditTools {
             }
         };
 
-        let new_content = match string_replace(&content, &params.before, &params.after) {
-            Ok(c) => c,
-            Err(msg) => {
-                return CallToolResult::error(vec![visible_text(msg)]);
-            }
-        };
+        let new_content =
+            match string_replace(&content, &params.before, &params.after, params.replace_all) {
+                Ok(c) => c,
+                Err(msg) => {
+                    return CallToolResult::error(vec![visible_text(msg)]);
+                }
+            };
         match fs::write(&path, &new_content) {
             Ok(()) => {
+                if params.replace_all {
+                    let count = content.matches(&match_text(&content, &params.before)).count();
+                    return CallToolResult::success(vec![visible_text(format!(
+                        "Edited {} ({} replacements)",
+                        params.path, count
+                    ))]);
+                }
                 let old_lines = params.before.lines().count();
                 let new_lines = params.after.lines().count();
                 let before = if content.contains("\r\n") && !params.before.contains("\r\n") {
@@ -175,7 +186,21 @@ fn to_crlf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
-pub fn string_replace(content: &str, before: &str, after: &str) -> Result<String, String> {
+/// `before` in the file's own line endings (models send LF; CRLF files are matched as CRLF).
+fn match_text(content: &str, before: &str) -> String {
+    if content.contains("\r\n") && !before.contains("\r\n") {
+        to_crlf(before)
+    } else {
+        before.to_string()
+    }
+}
+
+pub fn string_replace(
+    content: &str,
+    before: &str,
+    after: &str,
+    replace_all: bool,
+) -> Result<String, String> {
     // Models send LF; match CRLF files (e.g. git autocrlf on Windows) in their own line endings.
     let (before, after) = if content.contains("\r\n") && !before.contains("\r\n") {
         (to_crlf(before), to_crlf(after))
@@ -197,9 +222,10 @@ pub fn string_replace(content: &str, before: &str, after: &str) -> Result<String
             Err(msg)
         }
         1 => Ok(content.replacen(before, after, 1)),
+        _ if replace_all => Ok(content.replace(before, after)),
         n => {
             let mut msg = format!(
-                "Found {} matches. Please provide more context to identify a unique match:\n",
+                "Found {} matches. Please provide more context to identify a unique match, or set replace_all to replace every occurrence:\n",
                 n
             );
 
@@ -470,6 +496,7 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             before: "println!(\"hello\");".to_string(),
             after: "println!(\"world\");".to_string(),
+            replace_all: false,
         });
 
         assert!(!result.is_error.unwrap_or(false));
@@ -513,6 +540,7 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             before: "a\nb".to_string(),
             after: "x\ny".to_string(),
+            replace_all: false,
         });
 
         assert!(!result.is_error.unwrap_or(false));
@@ -530,6 +558,7 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             before: "nonexistent".to_string(),
             after: "replacement".to_string(),
+            replace_all: false,
         });
 
         assert!(result.is_error.unwrap_or(false));
@@ -550,10 +579,66 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             before: "foo".to_string(),
             after: "qux".to_string(),
+            replace_all: false,
         });
 
         assert!(result.is_error.unwrap_or(false));
         assert_eq!(fs::read_to_string(&path).unwrap(), "foo\nbar\nfoo\nbaz");
+    }
+
+    #[test]
+    fn test_file_edit_replace_all() {
+        let dir = setup();
+        let path = dir.path().join("edit.txt");
+        fs::write(&path, "foo\nbar\nfoo\nbaz").unwrap();
+        let tools = EditTools::new();
+
+        let result = tools.file_edit(FileEditParams {
+            path: path.to_string_lossy().to_string(),
+            before: "foo".to_string(),
+            after: "qux".to_string(),
+            replace_all: true,
+        });
+
+        assert!(!result.is_error.unwrap_or(false));
+        assert!(extract_text(&result).ends_with("(2 replacements)"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "qux\nbar\nqux\nbaz");
+    }
+
+    #[test]
+    fn test_file_edit_replace_all_crlf() {
+        let dir = setup();
+        let path = dir.path().join("edit.txt");
+        fs::write(&path, "a\r\nb\r\na\r\nb\r\n").unwrap();
+        let tools = EditTools::new();
+
+        let result = tools.file_edit(FileEditParams {
+            path: path.to_string_lossy().to_string(),
+            before: "a\nb".to_string(),
+            after: "x".to_string(),
+            replace_all: true,
+        });
+
+        assert!(!result.is_error.unwrap_or(false));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "x\r\nx\r\n");
+    }
+
+    #[test]
+    fn test_file_edit_replace_all_no_match() {
+        let dir = setup();
+        let path = dir.path().join("edit.txt");
+        fs::write(&path, "some content").unwrap();
+        let tools = EditTools::new();
+
+        let result = tools.file_edit(FileEditParams {
+            path: path.to_string_lossy().to_string(),
+            before: "nonexistent".to_string(),
+            after: "x".to_string(),
+            replace_all: true,
+        });
+
+        assert!(result.is_error.unwrap_or(false));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "some content");
     }
 
     #[test]
@@ -567,6 +652,7 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             before: "\ndelete me".to_string(),
             after: "".to_string(),
+            replace_all: false,
         });
 
         assert!(!result.is_error.unwrap_or(false));
@@ -604,6 +690,7 @@ mod tests {
                 path: "relative-edit.txt".to_string(),
                 before: "before".to_string(),
                 after: "after".to_string(),
+                replace_all: false,
             },
             Some(dir.path()),
         );

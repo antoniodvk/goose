@@ -183,7 +183,8 @@ struct TruncationInfo {
 pub struct ShellParams {
     pub command: String,
     /// Maximum time in seconds to allow the command to run before it is killed.
-    /// If omitted, defaults to DEFAULT_EXTENSION_TIMEOUT.
+    /// If omitted, the default is 300 seconds. Set a higher value for long builds
+    /// or tests; 0 means no time limit.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }

@@ -1,11 +1,17 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use ignore::WalkBuilder;
 use rmcp::model::{CallToolResult, ContentBlock};
 use schemars::JsonSchema;
 use serde::Deserialize;
+
+use super::shell::OUTPUT_LIMIT_BYTES;
+
+/// Files larger than this are listed without a line count instead of being read just to count lines.
+const MAX_COUNTED_FILE_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TreeParams {
@@ -73,6 +79,7 @@ impl TreeTool {
         if output.is_empty() {
             output.push_str("(empty directory)");
         }
+        output = cap_tree_output(output);
 
         CallToolResult::success(vec![ContentBlock::text(output)])
     }
@@ -87,7 +94,8 @@ impl Default for TreeTool {
 #[derive(Default)]
 struct DirectoryNode {
     dirs: BTreeMap<String, DirectoryNode>,
-    files: BTreeMap<String, usize>,
+    /// Line count per file; `None` for binary or very large files.
+    files: BTreeMap<String, Option<usize>>,
     total_lines: usize,
 }
 
@@ -99,7 +107,7 @@ impl DirectoryNode {
         }
     }
 
-    fn insert_file(&mut self, components: &[String], line_count: usize) {
+    fn insert_file(&mut self, components: &[String], line_count: Option<usize>) {
         if components.is_empty() {
             return;
         }
@@ -119,7 +127,7 @@ impl DirectoryNode {
             .values_mut()
             .map(DirectoryNode::compute_total_lines)
             .sum();
-        let file_lines: usize = self.files.values().copied().sum();
+        let file_lines: usize = self.files.values().flatten().copied().sum();
         self.total_lines = dir_lines + file_lines;
         self.total_lines
     }
@@ -138,12 +146,12 @@ impl DirectoryNode {
         }
 
         for (name, line_count) in &self.files {
-            out.push_str(&format!(
-                "{}{}  {}\n",
-                indent,
-                name,
-                format_lines(*line_count)
-            ));
+            match line_count {
+                Some(lines) => {
+                    out.push_str(&format!("{}{}  {}\n", indent, name, format_lines(*lines)))
+                }
+                None => out.push_str(&format!("{}{}\n", indent, name)),
+            }
         }
     }
 }
@@ -155,7 +163,9 @@ fn collect_tree(root: &Path, max_depth: Option<usize>) -> DirectoryNode {
     builder.git_global(true);
     builder.require_git(false);
     builder.ignore(true);
-    builder.hidden(true);
+    // Show hidden entries such as .claude and .github, but never the git directory itself.
+    builder.hidden(false);
+    builder.filter_entry(|entry| entry.file_name() != ".git");
 
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth + 1));
@@ -204,11 +214,36 @@ fn relative_components(path: &Path) -> Option<Vec<String>> {
     }
 }
 
-fn count_file_lines(path: &Path) -> usize {
-    match fs::read_to_string(path) {
-        Ok(content) => content.lines().count(),
-        Err(_) => 0,
+/// Counts lines without reading files that are large or binary just for the count.
+fn count_file_lines(path: &Path) -> Option<usize> {
+    let file = fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_COUNTED_FILE_BYTES {
+        return None;
     }
+    let mut bytes = Vec::new();
+    file.take(MAX_COUNTED_FILE_BYTES).read_to_end(&mut bytes).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let newlines = bytes.iter().filter(|b| **b == b'\n').count();
+    Some(newlines + usize::from(bytes.last().is_some_and(|b| *b != b'\n')))
+}
+
+fn cap_tree_output(output: String) -> String {
+    if output.len() <= OUTPUT_LIMIT_BYTES {
+        return output;
+    }
+    let mut kept = String::new();
+    for line in output.split_inclusive('\n') {
+        if kept.len() + line.len() > OUTPUT_LIMIT_BYTES {
+            break;
+        }
+        kept.push_str(line);
+    }
+    format!(
+        "{}[Output limited to {} bytes. Use a smaller depth or list a subdirectory.]",
+        kept, OUTPUT_LIMIT_BYTES
+    )
 }
 
 fn format_lines(lines: usize) -> String {
@@ -274,6 +309,48 @@ mod tests {
         assert!(text.contains("a/"));
         assert!(text.contains("b/"));
         assert!(!text.contains("deep.rs"));
+    }
+
+    #[test]
+    fn tree_shows_hidden_directories_but_not_git() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".claude/settings.json"), "{}\n").unwrap();
+        fs::write(dir.path().join(".git/HEAD"), "ref\n").unwrap();
+
+        let tool = TreeTool::new();
+        let result = tool.tree(TreeParams {
+            path: dir.path().display().to_string(),
+            depth: 2,
+        });
+
+        let text = extract_text(&result);
+        assert!(text.contains(".claude/"));
+        assert!(text.contains("settings.json"));
+        assert!(!text.contains(".git/"));
+        assert!(!text.contains("HEAD"));
+    }
+
+    #[test]
+    fn tree_caps_output_and_skips_count_for_binary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..2000 {
+            fs::write(dir.path().join(format!("file_with_a_long_name_{i:04}.rs")), "x\n").unwrap();
+        }
+        fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 0]).unwrap();
+
+        let tool = TreeTool::new();
+        let result = tool.tree(TreeParams {
+            path: dir.path().display().to_string(),
+            depth: 1,
+        });
+
+        let text = extract_text(&result);
+        assert!(text.len() < OUTPUT_LIMIT_BYTES + 200);
+        assert!(text.contains("[Output limited to"));
+        assert_eq!(count_file_lines(&dir.path().join("blob.bin")), None);
+        assert_eq!(count_file_lines(&dir.path().join("file_with_a_long_name_0000.rs")), Some(1));
     }
 
     #[test]
