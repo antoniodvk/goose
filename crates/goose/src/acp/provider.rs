@@ -271,6 +271,11 @@ impl AcpSessionState {
     }
 }
 
+/// claude-agent-acp attaches the Claude plan rate-limit status (`status`
+/// allowed | allowed_warning | rejected, `resetsAt`, `rateLimitType`) to
+/// `usage_update` under this `_meta` key (acp-agent.js `rate_limit_event`).
+const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
+
 pub struct AcpProvider {
     name: String,
     goose_mode: Arc<Mutex<GooseMode>>,
@@ -291,6 +296,9 @@ pub struct AcpProvider {
     /// prompt. Preferred over the prompt response's `total_tokens`, which some
     /// agents (claude-agent-acp) report as the sum of all calls. 0 = none yet.
     context_used: Arc<AtomicU64>,
+    /// Latest `usage_update._meta["_claude/rateLimit"]` (plan rate-limit status
+    /// and reset time from claude-agent-acp), kept verbatim.
+    rate_limit: Arc<Mutex<Option<serde_json::Value>>>,
 
     /// Config option id used to select the model, if this agent supports it.
     model_config_option_id: Option<String>,
@@ -402,6 +410,7 @@ impl AcpProvider {
             Arc::new(Mutex::new(HashMap::new()));
         let context_size = Arc::new(AtomicU64::new(0));
         let context_used = Arc::new(AtomicU64::new(0));
+        let rate_limit = Arc::new(Mutex::new(None));
         let effort = AcpEffortState::new();
         let client_loop = AcpClientLoop::new(
             config,
@@ -409,6 +418,7 @@ impl AcpProvider {
             pending_tool_updates.clone(),
             context_size.clone(),
             context_used.clone(),
+            rate_limit.clone(),
             effort.clone(),
         );
         let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -453,6 +463,7 @@ impl AcpProvider {
             handoff_context_sent: Arc::new(AtomicBool::new(false)),
             context_size,
             context_used,
+            rate_limit,
             model_config_option_id,
             applied_model: Arc::new(Mutex::new(applied_model)),
             effort,
@@ -690,6 +701,10 @@ impl Provider for AcpProvider {
 
     fn provider_session_id(&self) -> Option<String> {
         Some(self.acp_session_id().to_string())
+    }
+
+    fn rate_limit_signal(&self) -> Option<serde_json::Value> {
+        self.rate_limit.lock().ok().and_then(|guard| guard.clone())
     }
 
     fn skip_canonical_filtering(&self) -> bool {
@@ -1164,6 +1179,7 @@ struct AcpClientLoop {
     pending_tool_updates: Arc<Mutex<HashMap<String, AccumulatedToolCall>>>,
     context_size: Arc<AtomicU64>,
     context_used: Arc<AtomicU64>,
+    rate_limit: Arc<Mutex<Option<serde_json::Value>>>,
     effort: AcpEffortState,
 }
 
@@ -1174,6 +1190,7 @@ impl AcpClientLoop {
         pending_tool_updates: Arc<Mutex<HashMap<String, AccumulatedToolCall>>>,
         context_size: Arc<AtomicU64>,
         context_used: Arc<AtomicU64>,
+        rate_limit: Arc<Mutex<Option<serde_json::Value>>>,
         effort: AcpEffortState,
     ) -> Self {
         Self {
@@ -1183,6 +1200,7 @@ impl AcpClientLoop {
             pending_tool_updates,
             context_size,
             context_used,
+            rate_limit,
             effort,
         }
     }
@@ -1239,6 +1257,7 @@ impl AcpClientLoop {
             pending_tool_updates,
             context_size,
             context_used,
+            rate_limit,
             effort,
         } = self;
         let notification_callback = config.notification_callback.clone();
@@ -1255,6 +1274,7 @@ impl AcpClientLoop {
                     let pending_tool_updates = pending_tool_updates.clone();
                     let context_size = context_size.clone();
                     let context_used = context_used.clone();
+                    let rate_limit = rate_limit.clone();
                     let session_state = session_state.clone();
                     async move |notification: SessionNotification, _cx| {
                         let is_active_session =
@@ -1302,6 +1322,15 @@ impl AcpClientLoop {
                             SessionUpdate::UsageUpdate(usage) => {
                                 context_size.store(usage.size, Ordering::Relaxed);
                                 context_used.store(usage.used, Ordering::Relaxed);
+                                if let Some(signal) = usage
+                                    .meta
+                                    .as_ref()
+                                    .and_then(|meta| meta.get(CLAUDE_RATE_LIMIT_META_KEY))
+                                {
+                                    if let Ok(mut guard) = rate_limit.lock() {
+                                        *guard = Some(signal.clone());
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -2575,6 +2604,7 @@ mod tests {
                 handoff_context_sent: Arc::new(AtomicBool::new(false)),
                 context_size: Arc::new(AtomicU64::new(0)),
                 context_used: Arc::new(AtomicU64::new(0)),
+                rate_limit: Arc::new(Mutex::new(None)),
                 model_config_option_id: None,
                 applied_model: Arc::new(Mutex::new(None)),
                 effort: AcpEffortState::new(),

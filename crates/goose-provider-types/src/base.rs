@@ -608,6 +608,13 @@ pub trait Provider: MaybeSend + MaybeSync {
         Ok(None)
     }
 
+    /// The latest plan rate-limit signal this provider instance received,
+    /// verbatim as the agent sent it (claude-agent-acp:
+    /// `usage_update._meta["_claude/rateLimit"]`). `None`: nothing received.
+    fn rate_limit_signal(&self) -> Option<serde_json::Value> {
+        None
+    }
+
     async fn fetch_supported_model_info(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         Ok(self
             .fetch_supported_models()

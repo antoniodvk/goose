@@ -798,6 +798,15 @@ pub(super) fn build_usage_updates(
     }
 }
 
+/// `_meta` for the standard `usage_update` carrying the provider's plan
+/// rate-limit signal under claude-agent-acp's own key, so clients read it the
+/// same way they would from Claude Code directly.
+pub(super) fn rate_limit_meta(signal: serde_json::Value) -> Meta {
+    let mut meta = Meta::new();
+    meta.insert("_claude/rateLimit".to_string(), signal);
+    meta
+}
+
 /// Resolve the cwd an existing session should be activated with: a
 /// host-imposed cwd (roaming) wins, otherwise the client-requested cwd is
 /// honored as-is, preserving standard ACP semantics.
@@ -2133,9 +2142,18 @@ impl GooseAcpAgent {
         if self.supports_goose_custom_notifications() {
             cx.send_notification(updates.custom)?;
         }
+        let mut standard = updates.standard;
+        if let Some(signal) = agent
+            .provider(session_id)
+            .await
+            .ok()
+            .and_then(|provider| provider.rate_limit_signal())
+        {
+            standard = standard.meta(rate_limit_meta(signal));
+        }
         cx.send_notification(SessionNotification::new(
             acp_session_id.clone(),
-            SessionUpdate::UsageUpdate(updates.standard),
+            SessionUpdate::UsageUpdate(standard),
         ))?;
 
         Ok(session)
