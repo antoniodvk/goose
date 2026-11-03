@@ -98,6 +98,68 @@ struct AgentMetadata {
     description: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// Claude Code's tool list: "Read, Grep, Bash" or a YAML list.
+    #[serde(default)]
+    tools: Option<serde_json::Value>,
+}
+
+/// Tool names from an agent file's `tools:` field.
+fn agent_tool_names(value: &serde_json::Value) -> Vec<String> {
+    let names: Vec<String> = match value {
+        serde_json::Value::String(list) => list.split(',').map(str::to_string).collect(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    names
+        .into_iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// Extensions a named agent may use, by extension key: None = every tool of it, Some = only these tools.
+/// GOOSE_SUBAGENT_TOOL_MAP ({"<Claude Code tool>": ["<extension>__<tool>" | "<extension>", ...]}) translates the
+/// agent file's `tools:`; Claude's MCP names (mcp__<server>__<tool>) map to <server>__<tool> by themselves.
+/// Without the map (only the Goose Code process sets it) `tools:` stays unused and the helper keeps every extension (C115).
+fn agent_tool_filter(tools: &[String]) -> Option<HashMap<String, Option<Vec<String>>>> {
+    let map = Config::global()
+        .get_param::<HashMap<String, Vec<String>>>("GOOSE_SUBAGENT_TOOL_MAP")
+        .ok()?;
+    let mut allowed: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    for tool in tools {
+        let targets = match map.get(tool) {
+            Some(targets) => targets.clone(),
+            None => match tool.strip_prefix("mcp__") {
+                Some(rest) => vec![rest.to_string()],
+                None => {
+                    warn!("Agent tool '{}' has no goose counterpart; left out", tool);
+                    continue;
+                }
+            },
+        };
+        for target in targets {
+            match target.split_once("__") {
+                Some((extension, name)) => {
+                    if let Some(names) = allowed
+                        .entry(crate::config::extensions::name_to_key(extension))
+                        .or_insert_with(|| Some(Vec::new()))
+                    {
+                        if !names.iter().any(|n| n == name) {
+                            names.push(name.to_string());
+                        }
+                    }
+                }
+                None => {
+                    allowed.insert(crate::config::extensions::name_to_key(&target), None);
+                }
+            }
+        }
+    }
+    Some(allowed)
 }
 
 fn parse_agent_content(content: &str, path: &Path) -> Option<SourceEntry> {
@@ -127,6 +189,11 @@ fn parse_agent_content(content: &str, path: &Path) -> Option<SourceEntry> {
     let mut properties = std::collections::HashMap::new();
     if let Some(model) = metadata.model {
         properties.insert("model".to_string(), serde_json::Value::String(model));
+    }
+    if let Some(tools) = metadata.tools.as_ref().map(agent_tool_names) {
+        if !tools.is_empty() {
+            properties.insert("tools".to_string(), serde_json::json!(tools));
+        }
     }
 
     Some(SourceEntry {
@@ -599,6 +666,20 @@ impl SummonClient {
         let sources = self.get_sources(session_id, working_dir).await;
 
         Ok(sources.iter().find(|s| s.name == name).cloned())
+    }
+
+    /// The `tools:` list of the named agent a delegate call starts, if it has one.
+    async fn agent_tools(&self, params: &DelegateParams, parent: &Session) -> Option<Vec<String>> {
+        let name = params.source.as_deref()?;
+        let source = self
+            .resolve_source(&parent.id, name, &parent.working_dir)
+            .await
+            .ok()??;
+        if !matches!(source.source_type, SourceType::Agent) {
+            return None;
+        }
+        let tools = agent_tool_names(source.properties.get("tools")?);
+        (!tools.is_empty()).then_some(tools)
     }
 
     async fn load_subrecipe_content(&self, session_id: &str, name: &str) -> Result<String, String> {
@@ -1299,6 +1380,23 @@ impl SummonClient {
                     );
                 }
             }
+        }
+
+        // A named agent with `tools:` gets only those tools, as in Claude Code (C115).
+        if let Some(allowed) = self
+            .agent_tools(params, session)
+            .await
+            .as_deref()
+            .and_then(agent_tool_filter)
+        {
+            extensions = extensions
+                .into_iter()
+                .filter_map(|ext| match allowed.get(&ext.key()) {
+                    None => None,
+                    Some(None) => Some(ext),
+                    Some(Some(tools)) => Some(ext.with_available_tools(tools.clone())),
+                })
+                .collect();
         }
 
         let (provider_name, model_config) = self

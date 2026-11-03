@@ -379,6 +379,25 @@ impl ExtensionConfig {
         available_tools.is_empty() || available_tools.contains(&tool_name.to_string())
     }
 
+    /// The same extension limited to these tools (an empty list keeps every tool).
+    pub fn with_available_tools(mut self, tools: Vec<String>) -> Self {
+        match &mut self {
+            Self::StreamableHttp {
+                available_tools, ..
+            }
+            | Self::Stdio {
+                available_tools, ..
+            }
+            | Self::Builtin {
+                available_tools, ..
+            }
+            | Self::Platform {
+                available_tools, ..
+            } => *available_tools = tools,
+        }
+        self
+    }
+
     pub async fn resolve(self, config: &Config) -> ExtensionResult<Self> {
         match self {
             Self::Stdio {
