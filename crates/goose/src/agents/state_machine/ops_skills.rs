@@ -65,11 +65,129 @@ fn skills_disabled() -> bool {
     std::env::var_os("GOOSE_NO_SKILL_LIST").is_some_and(|value| !value.is_empty())
 }
 
-fn skill_instructions(working_dir: &Path) -> Option<String> {
+/// Skill listing rules of Claude Code (C152), switched on by `GOOSE_SKILL_LISTING` (JSON), which the
+/// Goose App server fills from Claude Code's settings for Goose Code. Claude Code (2.x, `aun`/`lun`/`oVt`
+/// in its bundle): the listing gets `window * 4 * budgetFraction` characters (default 1 %, window 200,000
+/// when unknown), each description at most `maxDescChars` (default 1,536); over budget, names stay and
+/// descriptions are dropped starting with the least used skill (score from `skillUsage`); bundled skills
+/// and `name-only` overrides are never ranked; `off` and `user-invocable-only` skills are not listed.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ListingRules {
+    #[serde(default)]
+    overrides: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    usage: std::collections::HashMap<String, f64>,
+    budget_fraction: Option<f64>,
+    max_desc_chars: Option<usize>,
+}
+
+const CLAUDE_BUDGET_FRACTION: f64 = 0.01;
+const CLAUDE_CHARS_PER_TOKEN: f64 = 4.0;
+const CLAUDE_FALLBACK_WINDOW: usize = 200_000;
+const CLAUDE_MAX_DESC_CHARS: usize = 1536;
+
+fn listing_rules() -> Option<ListingRules> {
+    let raw = std::env::var("GOOSE_SKILL_LISTING").ok()?;
+    match serde_json::from_str(&raw) {
+        Ok(rules) => Some(rules),
+        Err(error) => {
+            tracing::warn!("GOOSE_SKILL_LISTING is not valid JSON, listing all skills: {error}");
+            None
+        }
+    }
+}
+
+/// Context window of the session's model: the size goose learned for this model, else the configured
+/// limit, else Claude Code's fallback.
+fn context_window(session: &Session) -> usize {
+    use crate::session::{ContextWindowState, ExtensionState};
+    let model = session.model_config.as_ref().map(|m| m.model_name.as_str());
+    ContextWindowState::from_extension_data(&session.extension_data)
+        .filter(|state| Some(state.model.as_str()) == model && state.size > 0)
+        .map(|state| state.size)
+        .or_else(|| session.model_config.as_ref().and_then(|m| m.context_limit))
+        .unwrap_or(CLAUDE_FALLBACK_WINDOW)
+}
+
+struct ListingEntry<'a> {
+    name: &'a str,
+    description: &'a str,
+    bundled: bool,
+    name_only: bool,
+}
+
+fn listing_lines(
+    entries: &[ListingEntry],
+    rules: Option<&ListingRules>,
+    window: usize,
+) -> Vec<String> {
+    let Some(rules) = rules else {
+        return entries
+            .iter()
+            .map(|e| format!("- {}: {}", e.name, e.description))
+            .collect();
+    };
+    let max_desc = rules.max_desc_chars.unwrap_or(CLAUDE_MAX_DESC_CHARS).max(1);
+    let fraction = rules.budget_fraction.unwrap_or(CLAUDE_BUDGET_FRACTION);
+    let budget = ((window as f64 * CLAUDE_CHARS_PER_TOKEN * fraction).floor() as i64).max(1);
+    let name_len = |e: &ListingEntry| e.name.chars().count() as i64;
+    let entry_len = |e: &ListingEntry| {
+        if e.name_only {
+            name_len(e) + 2
+        } else {
+            name_len(e) + 4 + e.description.chars().count().min(max_desc) as i64
+        }
+    };
+    let separators = entries.len().saturating_sub(1) as i64;
+    let total: i64 = entries.iter().map(entry_len).sum::<i64>() + separators;
+    let mut without_description = std::collections::HashSet::new();
+    if total > budget {
+        let fixed = |e: &ListingEntry| e.bundled || e.name_only;
+        let base: i64 = entries
+            .iter()
+            .map(|e| {
+                if fixed(e) {
+                    entry_len(e)
+                } else {
+                    name_len(e) + 2
+                }
+            })
+            .sum::<i64>()
+            + separators;
+        let mut left = budget - base;
+        let score = |e: &ListingEntry| rules.usage.get(e.name).copied().unwrap_or(0.0);
+        let mut ranked: Vec<&ListingEntry> = entries.iter().filter(|e| !fixed(e)).collect();
+        ranked.sort_by(|a, b| score(b).total_cmp(&score(a)));
+        for e in ranked {
+            let extra = entry_len(e) - (name_len(e) + 2);
+            if extra <= left {
+                left -= extra;
+            } else {
+                without_description.insert(e.name);
+            }
+        }
+    }
+    entries
+        .iter()
+        .map(|e| {
+            if e.name_only || without_description.contains(e.name) {
+                format!("- {}", e.name)
+            } else if e.description.chars().count() > max_desc {
+                let cut: String = e.description.chars().take(max_desc - 1).collect();
+                format!("- {}: {cut}\u{2026}", e.name)
+            } else {
+                format!("- {}: {}", e.name, e.description)
+            }
+        })
+        .collect()
+}
+
+fn skill_instructions(session: &Session) -> Option<String> {
     if skills_disabled() {
         return None;
     }
-    let sources = crate::skills::discover_skills(Some(working_dir));
+    let sources = crate::skills::discover_skills(Some(&session.working_dir));
     let mut skills: Vec<&SourceEntry> = sources
         .iter()
         .filter(|source| {
@@ -80,15 +198,34 @@ fn skill_instructions(working_dir: &Path) -> Option<String> {
         })
         .collect();
     skills.sort_by(|a, b| (&a.name, &a.path).cmp(&(&b.name, &b.path)));
-    if skills.is_empty() {
+    let rules = listing_rules();
+    let mode = |name: &str| {
+        rules
+            .as_ref()
+            .and_then(|r| r.overrides.get(name))
+            .map(String::as_str)
+            .unwrap_or("on")
+    };
+    let entries: Vec<ListingEntry> = skills
+        .iter()
+        .filter(|s| !matches!(mode(&s.name), "off" | "user-invocable-only"))
+        .map(|s| ListingEntry {
+            name: &s.name,
+            description: &s.description,
+            bundled: s.source_type == SourceType::BuiltinSkill,
+            name_only: mode(&s.name) == "name-only",
+        })
+        .collect();
+    if entries.is_empty() {
         return None;
     }
 
     let mut instructions = String::from(
         "# Skills\n\nYou have these skills at your disposal. Load one when it can help with the task or when the user asks for it:",
     );
-    for skill in skills {
-        instructions.push_str(&format!("\n- {}: {}", skill.name, skill.description));
+    for line in listing_lines(&entries, rules.as_ref(), context_window(session)) {
+        instructions.push('\n');
+        instructions.push_str(&line);
     }
     Some(instructions)
 }
@@ -324,7 +461,7 @@ impl Operation<Session, GooseEffect> for SkillOperation {
         session: &Session,
         _conversation: &Conversation,
     ) -> Result<Vec<(String, String)>> {
-        Ok(skill_instructions(&session.working_dir)
+        Ok(skill_instructions(session)
             .map(|instructions| ("skills".to_string(), instructions))
             .into_iter()
             .collect())
