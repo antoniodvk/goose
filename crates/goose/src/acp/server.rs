@@ -1359,7 +1359,16 @@ impl GooseAcpAgent {
                             permission_tool_meta(tool_request, &target.agent, &target.session_id)
                                 .await
                         }
-                        None => None,
+                        None => {
+                            listed_permission_tool_meta(
+                                &self.session_manager,
+                                &target.agent,
+                                &target.session_id,
+                                id,
+                                tool_name,
+                            )
+                            .await
+                        }
                     };
                     self.handle_tool_permission_request(
                         cx,
@@ -1621,6 +1630,40 @@ async fn permission_tool_meta(
         .and_then(|tool| tool.annotations)
         .and_then(|annotations| annotations.read_only_hint);
     permission_tool_call_meta(tool_request, read_only_hint)
+}
+
+/// Permission requests a subagent forwards (and requests resent after `session/load`) arrive
+/// without the tool request they belong to. The tool is then looked up by name in the tool list
+/// of the session that called it, so the client gets the same identity as for its own calls.
+async fn listed_permission_tool_meta(
+    session_manager: &SessionManager,
+    agent: &Agent,
+    session_id: &str,
+    request_id: &str,
+    tool_name: &str,
+) -> Option<Meta> {
+    let (calling_session_id, _) = session_manager
+        .action_required()
+        .answered_request(session_id, request_id)
+        .ok()?;
+    let tool = agent
+        .list_tools(&calling_session_id, None)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|tool| tool.name == tool_name)?;
+    let tool_request = ToolRequest {
+        id: request_id.to_string(),
+        tool_call: Ok(rmcp::model::CallToolRequestParams::new(
+            tool_name.to_string(),
+        )),
+        metadata: None,
+        tool_meta: tool.meta.and_then(|meta| serde_json::to_value(meta).ok()),
+    };
+    let read_only_hint = tool
+        .annotations
+        .and_then(|annotations| annotations.read_only_hint);
+    permission_tool_call_meta(&tool_request, read_only_hint)
 }
 
 fn outcome_to_confirmation(outcome: &RequestPermissionOutcome) -> PermissionConfirmation {
