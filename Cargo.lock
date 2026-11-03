@@ -4242,6 +4242,7 @@ dependencies = [
  "jsonschema",
  "keyring",
  "libc",
+ "lopdf",
  "lru",
  "minijinja",
  "mockall",

@@ -1,5 +1,6 @@
 pub mod edit;
 pub mod image;
+pub mod read;
 pub mod shell;
 mod shell_output_streaming;
 mod shell_process;
@@ -9,9 +10,10 @@ use crate::agents::mcp_client::{Error, McpClientTrait};
 use crate::agents::ToolCallContext;
 use anyhow::Result;
 use async_trait::async_trait;
-use edit::{EditTools, FileEditParams, FileReadParams, FileWriteParams};
+use edit::{EditTools, FileEditParams, FileWriteParams};
 use image::{ImageReadParams, ImageTool};
 use indoc::indoc;
+use read::{FileReadParams, ReadTool};
 use rmcp::model::{
     Annotations, CallToolResult, ContentBlock, Implementation, InitializeResult, JsonObject,
     ListToolsResult, ServerCapabilities, TextContent, Tool, ToolAnnotations,
@@ -35,6 +37,7 @@ pub struct DeveloperClient {
     info: InitializeResult,
     shell_tool: Arc<ShellTool>,
     edit_tools: Arc<EditTools>,
+    read_tool: Arc<ReadTool>,
     tree_tool: Arc<TreeTool>,
     image_tool: Arc<ImageTool>,
 }
@@ -85,6 +88,7 @@ impl DeveloperClient {
             info,
             shell_tool: Arc::new(ShellTool::new()?),
             edit_tools: Arc::new(EditTools::new()),
+            read_tool: Arc::new(ReadTool::new()),
             tree_tool: Arc::new(TreeTool::new()),
             image_tool: Arc::new(ImageTool::new()),
         })
@@ -111,7 +115,7 @@ impl DeveloperClient {
         vec![
             Tool::new(
                 "read".to_string(),
-                "Read a text file from disk. Use line and limit to read part of a large file; output is limited to 30,000 bytes.".to_string(),
+                "Read a file from disk. Text comes back with line numbers (`     12<tab>text`); the numbers are not part of the file, so leave them out when you pass text to edit. Reads the first 2000 lines by default and cuts lines at 2000 characters; use line and limit for more, output is limited to 100,000 bytes. Understands UTF-8, UTF-8 with BOM and UTF-16 with BOM. PDF files give their text per page: use pages (for example \"1-5\", at most 20 pages per request; required for PDFs with more than 10 pages). Jupyter notebooks (.ipynb) give all cells with their text outputs. For images use read_image.".to_string(),
                 Self::schema::<FileReadParams>(),
             )
             .annotate(ToolAnnotations::from_raw(
@@ -240,7 +244,7 @@ impl McpClientTrait for DeveloperClient {
                 Err(error) => Ok(ShellTool::error_result(&format!("Error: {error}"), None)),
             },
             "read" => match Self::parse_args::<FileReadParams>(arguments) {
-                Ok(params) => Ok(self.edit_tools.file_read_with_cwd(params, working_dir)),
+                Ok(params) => Ok(self.read_tool.file_read_with_cwd(params, working_dir)),
                 Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
                     "Error: {error}"
                 ))])),

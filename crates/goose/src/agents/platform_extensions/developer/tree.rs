@@ -221,7 +221,9 @@ fn count_file_lines(path: &Path) -> Option<usize> {
         return None;
     }
     let mut bytes = Vec::new();
-    file.take(MAX_COUNTED_FILE_BYTES).read_to_end(&mut bytes).ok()?;
+    file.take(MAX_COUNTED_FILE_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
     if bytes.contains(&0) {
         return None;
     }
@@ -336,7 +338,11 @@ mod tests {
     fn tree_caps_output_and_skips_count_for_binary_files() {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..2000 {
-            fs::write(dir.path().join(format!("file_with_a_long_name_{i:04}.rs")), "x\n").unwrap();
+            fs::write(
+                dir.path().join(format!("file_with_a_long_name_{i:04}.rs")),
+                "x\n",
+            )
+            .unwrap();
         }
         fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 0]).unwrap();
 
@@ -350,7 +356,10 @@ mod tests {
         assert!(text.len() < OUTPUT_LIMIT_BYTES + 200);
         assert!(text.contains("[Output limited to"));
         assert_eq!(count_file_lines(&dir.path().join("blob.bin")), None);
-        assert_eq!(count_file_lines(&dir.path().join("file_with_a_long_name_0000.rs")), Some(1));
+        assert_eq!(
+            count_file_lines(&dir.path().join("file_with_a_long_name_0000.rs")),
+            Some(1)
+        );
     }
 
     #[test]
