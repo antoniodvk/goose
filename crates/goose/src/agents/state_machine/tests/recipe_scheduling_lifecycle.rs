@@ -49,9 +49,11 @@ extensions:
     assert!(call.advertises_tool("todo__todo_write"));
     assert!(call.advertises_tool(super::calculator_extension::ADD));
 
-    api.on("write a note after the recipe")
-        .call("todo__todo_write", json!({ "content": "still available" }));
-    api.on("Updated (").reply("note saved");
+    api.on("write a note after the recipe").call(
+        "todo__todo_write",
+        json!({ "todos": [{ "content": "still available", "status": "pending" }] }),
+    );
+    api.on("Updated: ").reply("note saved");
     let result = pipeline.run(["write a note after the recipe"]).await?;
     result.assert_message(-1, Agent, "note saved");
     Ok(())

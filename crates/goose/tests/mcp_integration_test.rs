@@ -388,12 +388,12 @@ async fn extension_lifecycle_across_real_transports(stdio_version: ProtocolVersi
         &call(
             &lease,
             "todo__todo_write",
-            Some(object!({ "content": "- [ ] contract" }))
+            Some(object!({ "todos": [{ "content": "contract", "status": "pending" }] }))
         )
         .await
         .unwrap()
     )
-    .starts_with("Updated ("));
+    .starts_with("Updated: "));
 
     // Spellings a model mangles resolve to the same tools, and a sanitized
     // name reaches the server under its original name.

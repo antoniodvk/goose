@@ -282,7 +282,10 @@ mod tests {
                 .build()
                 .unwrap();
             assert!(prompt.contains(RULE), "{model} should get claude_system.md");
-            assert!(prompt.contains("# Turn Context"), "{model} keeps the turn context block");
+            assert!(
+                prompt.contains("# Turn Context"),
+                "{model} keeps the turn context block"
+            );
         }
 
         let other = manager

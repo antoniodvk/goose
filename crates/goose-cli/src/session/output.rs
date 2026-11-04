@@ -994,8 +994,16 @@ fn render_todo_request(call: &CallToolRequestParams, _debug: bool) {
     print_tool_header(call);
 
     if let Some(args) = &call.arguments {
-        if let Some(Value::String(content)) = args.get("content") {
-            println!("    {} {}", style("content").dim(), style(content).dim());
+        if let Some(Value::Array(todos)) = args.get("todos") {
+            for todo in todos {
+                let content = todo.get("content").and_then(Value::as_str).unwrap_or("");
+                let mark = match todo.get("status").and_then(Value::as_str) {
+                    Some("completed") => "[x]",
+                    Some("in_progress") => "[>]",
+                    _ => "[ ]",
+                };
+                println!("    {}", style(format!("{} {}", mark, content)).dim());
+            }
         }
     }
     println!();

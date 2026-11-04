@@ -80,10 +80,39 @@ pub trait ExtensionState: Sized + Serialize + for<'de> Deserialize<'de> {
     }
 }
 
+/// Progress of one task in the todo list, like Claude Code's TodoWrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// One task of the todo list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TodoItem {
+    /// What has to be done, as an imperative ("Run the tests")
+    pub content: String,
+    /// pending = not started, in_progress = working on it now, completed = done
+    pub status: TodoStatus,
+    /// The same task in the present continuous ("Running the tests"), shown while it is in progress
+    #[serde(
+        rename = "activeForm",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_form: Option<String>,
+}
+
 /// TODO extension state implementation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoState {
+    /// Free text of sessions written before the list had single tasks; new writes leave it empty
+    #[serde(default)]
     pub content: String,
+    #[serde(default)]
+    pub items: Vec<TodoItem>,
 }
 
 impl ExtensionState for TodoState {
@@ -92,9 +121,12 @@ impl ExtensionState for TodoState {
 }
 
 impl TodoState {
-    /// Create a new TODO state
-    pub fn new(content: String) -> Self {
-        Self { content }
+    /// Create a new TODO state from single tasks
+    pub fn new(items: Vec<TodoItem>) -> Self {
+        Self {
+            content: String::new(),
+            items,
+        }
     }
 }
 
@@ -272,13 +304,34 @@ mod tests {
         let mut extension_data = ExtensionData::new();
 
         // Create and save TODO state
-        let todo = TodoState::new("- Task 1\n- Task 2".to_string());
+        let todo = TodoState::new(vec![
+            TodoItem {
+                content: "Task 1".to_string(),
+                status: TodoStatus::Completed,
+                active_form: None,
+            },
+            TodoItem {
+                content: "Task 2".to_string(),
+                status: TodoStatus::InProgress,
+                active_form: Some("Doing task 2".to_string()),
+            },
+        ]);
         todo.to_extension_data(&mut extension_data).unwrap();
 
         // Retrieve TODO state
-        let retrieved = TodoState::from_extension_data(&extension_data);
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().content, "- Task 1\n- Task 2");
+        let retrieved = TodoState::from_extension_data(&extension_data).unwrap();
+        assert_eq!(retrieved.items, todo.items);
+        assert!(retrieved.content.is_empty());
+    }
+
+    #[test]
+    fn test_todo_state_reads_free_text_of_older_sessions() {
+        let mut extension_data = ExtensionData::new();
+        extension_data.set_extension_state("todo", "v0", json!({"content": "- Task 1\n- Task 2"}));
+
+        let retrieved = TodoState::from_extension_data(&extension_data).unwrap();
+        assert_eq!(retrieved.content, "- Task 1\n- Task 2");
+        assert!(retrieved.items.is_empty());
     }
 
     #[test]
