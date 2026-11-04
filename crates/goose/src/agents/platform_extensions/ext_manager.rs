@@ -77,27 +77,39 @@ pub struct ExtensionManagerClient {
 
 impl ExtensionManagerClient {
     pub fn new(context: PlatformExtensionContext) -> Result<Self> {
-        let info = InitializeResult::new(
-            ServerCapabilities::builder().enable_tools().build(),
-        )
-        .with_server_info(Implementation::new(EXTENSION_NAME, "1.0.0").with_title(EXTENSION_NAME))
-        .with_instructions(indoc! {r#"
-            Extension Management
+        // With tool search the tools of enabled extensions are only named under Deferred tools;
+        // without this hint models enabled an extension that was already on instead (C161).
+        let discover = if crate::agents::tool_search::enabled() {
+            "When you lack a tool, look under Deferred tools first: those tools belong to extensions\n\
+             that are already enabled, so load them with tool_search instead of enabling anything.\n\
+             Use search_available_extensions only to find extensions that are not enabled yet."
+        } else {
+            "When you lack the tools needed to complete a task, use search_available_extensions first\n\
+             to discover what extensions can help."
+        };
+        let instructions = format!(
+            "{}\n{discover}\n\n{}",
+            indoc! {r#"
+                Extension Management
 
-            Use these tools to discover, enable, and disable extensions, as well as review resources.
+                Use these tools to discover, enable, and disable extensions, as well as review resources.
 
-            Available tools:
-            - search_available_extensions: Find extensions available to enable/disable
-            - manage_extensions: Enable or disable extensions
-            - list_resources: List resources from extensions
-            - read_resource: Read specific resources from extensions
-
-            When you lack the tools needed to complete a task, use search_available_extensions first
-            to discover what extensions can help.
-
-            Use manage_extensions to enable or disable specific extensions by name.
-            Use list_resources and read_resource to work with extension data and resources.
-        "#});
+                Available tools:
+                - search_available_extensions: Find extensions available to enable/disable
+                - manage_extensions: Enable or disable extensions
+                - list_resources: List resources from extensions
+                - read_resource: Read specific resources from extensions
+            "#},
+            indoc! {r#"
+                Use manage_extensions to enable or disable specific extensions by name.
+                Use list_resources and read_resource to work with extension data and resources.
+            "#}
+        );
+        let info = InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                Implementation::new(EXTENSION_NAME, "1.0.0").with_title(EXTENSION_NAME),
+            )
+            .with_instructions(instructions);
 
         Ok(Self { info, context })
     }

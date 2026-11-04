@@ -168,8 +168,9 @@ pub(crate) fn prompt_section(deferrable: &[Tool]) -> String {
     names.sort_unstable();
     format!(
         "# Deferred tools\n\n\
-         These tools are available on demand. Until you load them with tool_search only their names \
-         are known, and calling one before that fails as not available. Load the ones a task needs \
+         These tools are available on demand; their extensions are already enabled. Until you load \
+         them with tool_search only their names are known, and calling one before that fails as not \
+         available. Load the ones a task needs \
          with tool_search (query \"select:<name>[,<name>...]\") before calling them:\n{}",
         names.join("\n")
     )
@@ -216,7 +217,7 @@ pub(crate) fn search<'a>(
                 .unwrap_or_default()
                 .to_lowercase();
             let parts: Vec<&str> = name
-                .split(|c: char| c == '_' || c == '-')
+                .split(['_', '-'])
                 .filter(|part| !part.is_empty())
                 .collect();
             let score: usize = terms
@@ -249,8 +250,8 @@ pub(crate) fn search<'a>(
 
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     let head = text.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix)
-        .then(|| &text[prefix.len()..])
+    let rest = text.get(prefix.len()..)?;
+    head.eq_ignore_ascii_case(prefix).then_some(rest)
 }
 
 /// Exact names first; a name without its extension prefix matches when exactly one tool has it.
