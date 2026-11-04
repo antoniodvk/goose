@@ -1,6 +1,7 @@
 pub mod edit;
 mod encoding;
 pub mod image;
+pub mod notebook;
 pub mod read;
 pub mod shell;
 mod shell_output_streaming;
@@ -14,6 +15,7 @@ use async_trait::async_trait;
 use edit::{EditTools, FileEditParams, FileWriteParams};
 use image::{ImageReadParams, ImageTool};
 use indoc::indoc;
+use notebook::{NotebookEditParams, NotebookTools};
 use read::{FileReadParams, ReadTool};
 use rmcp::model::{
     Annotations, CallToolResult, ContentBlock, Implementation, InitializeResult, JsonObject,
@@ -38,6 +40,7 @@ pub struct DeveloperClient {
     info: InitializeResult,
     shell_tool: Arc<ShellTool>,
     edit_tools: Arc<EditTools>,
+    notebook_tools: Arc<NotebookTools>,
     read_tool: Arc<ReadTool>,
     tree_tool: Arc<TreeTool>,
     image_tool: Arc<ImageTool>,
@@ -89,6 +92,7 @@ impl DeveloperClient {
             info,
             shell_tool: Arc::new(ShellTool::new()?),
             edit_tools: Arc::new(EditTools::new()),
+            notebook_tools: Arc::new(NotebookTools::new()),
             read_tool: Arc::new(ReadTool::new()),
             tree_tool: Arc::new(TreeTool::new()),
             image_tool: Arc::new(ImageTool::new()),
@@ -116,7 +120,7 @@ impl DeveloperClient {
         vec![
             Tool::new(
                 "read".to_string(),
-                "Read a file from disk. Text comes back with line numbers (`     12<tab>text`); the numbers are not part of the file, so leave them out when you pass text to edit. Reads the first 2000 lines by default and cuts lines at 2000 characters; use line and limit for more, output is limited to 100,000 bytes. Understands UTF-8, UTF-8 with BOM and UTF-16 with BOM. PDF files give their text per page: use pages (for example \"1-5\", at most 20 pages per request; required for PDFs with more than 10 pages). Jupyter notebooks (.ipynb) give all cells with their text outputs. For images use read_image. When you already know which part of a file matters, read just that part with line and limit. Don't read a file again only to confirm your own edit or write: both report an error when they fail.".to_string(),
+                "Read a file from disk. Text comes back with line numbers (`     12<tab>text`); the numbers are not part of the file, so leave them out when you pass text to edit. Reads the first 2000 lines by default and cuts lines at 2000 characters; use line and limit for more, output is limited to 100,000 bytes. Understands UTF-8, UTF-8 with BOM and UTF-16 with BOM. PDF files give their text per page: use pages (for example \"1-5\", at most 20 pages per request; required for PDFs with more than 10 pages). Jupyter notebooks (.ipynb) give all cells with their text outputs (change them with notebook_edit). For images use read_image. When you already know which part of a file matters, read just that part with line and limit. Don't read a file again only to confirm your own edit or write: both report an error when they fail.".to_string(),
                 Self::schema::<FileReadParams>(),
             )
             .annotate(ToolAnnotations::from_raw(
@@ -145,6 +149,18 @@ impl DeveloperClient {
             )
             .annotate(ToolAnnotations::from_raw(
                 Some("Edit".to_string()),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false),
+            )),
+            Tool::new(
+                "notebook_edit".to_string(),
+                "Change one cell of a Jupyter notebook (.ipynb): edit_mode replace (default) sets the source of the cell cell_id, insert adds a new cell after cell_id (at the start when cell_id is left out; cell_type code or markdown is required), delete removes the cell. cell_id is the id or the number that read shows for the cell (\"Cell 3\" is cell_id \"3\"). Replacing a code cell clears its outputs, since they belong to the old source. The rest of the notebook stays as it is. Use this instead of edit or write for .ipynb files, and read the notebook first.".to_string(),
+                Self::schema::<NotebookEditParams>(),
+            )
+            .annotate(ToolAnnotations::from_raw(
+                Some("Notebook Edit".to_string()),
                 Some(false),
                 Some(true),
                 Some(false),
@@ -274,6 +290,14 @@ impl McpClientTrait for DeveloperClient {
                     "Error: {error}"
                 ))])),
             },
+            "notebook_edit" => match Self::parse_args::<NotebookEditParams>(arguments) {
+                Ok(params) => Ok(self
+                    .notebook_tools
+                    .notebook_edit_with_cwd(params, working_dir)),
+                Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
+                    "Error: {error}"
+                ))])),
+            },
             "tree" => match Self::parse_args::<TreeParams>(arguments) {
                 Ok(params) => Ok(self.tree_tool.tree_with_cwd(params, working_dir)),
                 Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
@@ -316,7 +340,15 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["read", "write", "edit", "shell", "tree", "read_image"]
+            vec![
+                "read",
+                "write",
+                "edit",
+                "notebook_edit",
+                "shell",
+                "tree",
+                "read_image"
+            ]
         );
     }
 

@@ -46,8 +46,17 @@ impl Bom {
         }
     }
 
-    pub fn is_utf16(self) -> bool {
-        matches!(self, Bom::Utf16Le | Bom::Utf16Be)
+    fn utf16_units(self, pairs: &[[u8; 2]]) -> Vec<u16> {
+        pairs
+            .iter()
+            .map(|pair| {
+                if self == Bom::Utf16Be {
+                    u16::from_be_bytes(*pair)
+                } else {
+                    u16::from_le_bytes(*pair)
+                }
+            })
+            .collect()
     }
 
     /// Text as file bytes: byte order mark first, then the text in this encoding.
@@ -80,21 +89,12 @@ impl Bom {
                 .map(str::to_string)
                 .map_err(|_| "the file is not valid UTF-8 (nor UTF-16 with a BOM)"),
             Bom::Utf16Le | Bom::Utf16Be => {
-                let pairs = body.chunks_exact(2);
-                if !pairs.remainder().is_empty() {
+                let (pairs, rest) = body.as_chunks::<2>();
+                if !rest.is_empty() {
                     return Err("the UTF-16 file has an odd number of bytes");
                 }
-                let units: Vec<u16> = pairs
-                    .map(|pair| {
-                        let pair = [pair[0], pair[1]];
-                        if self == Bom::Utf16Be {
-                            u16::from_be_bytes(pair)
-                        } else {
-                            u16::from_le_bytes(pair)
-                        }
-                    })
-                    .collect();
-                String::from_utf16(&units).map_err(|_| "the UTF-16 file has an unpaired surrogate")
+                String::from_utf16(&self.utf16_units(pairs))
+                    .map_err(|_| "the UTF-16 file has an unpaired surrogate")
             }
         }
     }
@@ -104,18 +104,7 @@ impl Bom {
         match self {
             Bom::None | Bom::Utf8 => String::from_utf8_lossy(body).into_owned(),
             Bom::Utf16Le | Bom::Utf16Be => {
-                let units: Vec<u16> = body
-                    .chunks_exact(2)
-                    .map(|pair| {
-                        let pair = [pair[0], pair[1]];
-                        if self == Bom::Utf16Be {
-                            u16::from_be_bytes(pair)
-                        } else {
-                            u16::from_le_bytes(pair)
-                        }
-                    })
-                    .collect();
-                String::from_utf16_lossy(&units)
+                String::from_utf16_lossy(&self.utf16_units(body.as_chunks::<2>().0))
             }
         }
     }
