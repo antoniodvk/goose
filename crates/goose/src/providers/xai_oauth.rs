@@ -1122,7 +1122,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_preserves_not_configured_error() {
+    async fn stream_asks_for_sign_in_when_not_signed_in() {
         let directory = tempfile::tempdir().unwrap();
         let auth_provider = Arc::new(XaiOAuthAuthProvider {
             cache: TokenCache {
@@ -1148,7 +1148,10 @@ mod tests {
             .err()
             .unwrap();
 
-        assert_eq!(error, ProviderError::NotConfigured);
+        assert_eq!(
+            error,
+            ProviderError::Authentication("Grok sign-in required: not signed in".to_string())
+        );
     }
 
     #[test]
