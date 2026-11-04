@@ -208,14 +208,21 @@ fn modified(path: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-/// Path as shown in results: relative to the working directory when inside it.
+/// Path as shown in results: relative to the working directory when inside it, with the
+/// platform's separator throughout (a path given as `C:/x` would otherwise show as `C:/x\y`).
 fn display(path: &Path, base: &Path) -> String {
-    path.strip_prefix(base)
+    let shown = path
+        .strip_prefix(base)
         .ok()
         .filter(|rel| !rel.as_os_str().is_empty())
         .unwrap_or(path)
         .display()
-        .to_string()
+        .to_string();
+    if cfg!(windows) {
+        shown.replace('/', "\\")
+    } else {
+        shown
+    }
 }
 
 /// Text of a file, or `None` for binary, unreadable and very large files.
@@ -758,6 +765,16 @@ mod tests {
         let list = DenyList(vec![deny_regex("**/.env").unwrap()]);
         assert!(list.denies(Path::new(r"C:\project\.env")));
         assert!(!list.denies(Path::new(r"C:\project\.env.example")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn paths_outside_the_working_dir_use_one_separator() {
+        let shown = display(
+            &Path::new("C:/data/project").join(".claude").join("b.md"),
+            Path::new(r"C:\elsewhere"),
+        );
+        assert_eq!(shown, r"C:\data\project\.claude\b.md");
     }
 
     #[cfg(unix)]
