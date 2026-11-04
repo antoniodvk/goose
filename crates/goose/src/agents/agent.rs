@@ -8,6 +8,7 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use tracing_futures::Instrument;
 
+use super::background_subagents::BackgroundSubagents;
 use super::gen_ai_telemetry;
 use super::mcp_client::GooseMcpHostInfo;
 use super::tool_confirmation_coordinator::{
@@ -218,6 +219,7 @@ pub struct Agent {
     #[cfg(test)]
     pub(super) stop_hook_block_cap_override: Option<u32>,
     steer_queues: Mutex<HashMap<String, SteerQueue>>,
+    background_subagents: BackgroundSubagents,
 }
 
 fn user_event(event: AgentEvent) -> Option<AgentEvent> {
@@ -296,7 +298,12 @@ impl Agent {
             #[cfg(test)]
             stop_hook_block_cap_override: None,
             steer_queues: Mutex::new(HashMap::new()),
+            background_subagents: BackgroundSubagents::default(),
         })
+    }
+
+    pub fn background_subagents(&self) -> &BackgroundSubagents {
+        &self.background_subagents
     }
 
     /// Emit a lifecycle hook event with no extra context. Useful for events

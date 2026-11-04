@@ -1,4 +1,5 @@
 mod agent;
+pub mod background_subagents;
 pub mod container;
 pub mod execute_commands;
 pub mod extension;

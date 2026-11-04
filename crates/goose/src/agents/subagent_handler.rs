@@ -95,6 +95,10 @@ impl ForegroundSubagentRunner {
         &self.agent.config.session_manager
     }
 
+    pub(crate) fn background(&self) -> &crate::agents::background_subagents::BackgroundSubagents {
+        self.agent.background_subagents()
+    }
+
     pub(crate) async fn load(&self, subagent_id: &str) -> Result<Session> {
         self.session_manager().get_session(subagent_id, true).await
     }

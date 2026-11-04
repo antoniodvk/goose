@@ -7,12 +7,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agents::extension_manager::{ExtensionLease, ExtensionManager};
 use crate::agents::state_machine::{
-    BangShellOperation, CompactionOperation, DoctorOperation, EmptyResponseOperation,
-    ExitOnErrorOperation, GooseEffect, GooseInferenceProvider, GooseInferenceRequestPreparer,
-    InferenceRunner, MaxTurnsOperation, Operation, ProjectOperation, RecipeOperation,
-    RemainingToolCallsOperation, RetryOperation, SkillOperation, SlashCommandOperation,
-    StateMachine, StatusOperation, SteerOperation, SteerQueue, Step, StopHookOperation,
-    SubagentOperation, ToolApprovalOperation, ToolExecutionOperation, ToolPairCompactionOperation,
+    BackgroundSubagentOperation, BangShellOperation, CompactionOperation, DoctorOperation,
+    EmptyResponseOperation, ExitOnErrorOperation, GooseEffect, GooseInferenceProvider,
+    GooseInferenceRequestPreparer, InferenceRunner, MaxTurnsOperation, Operation, ProjectOperation,
+    RecipeOperation, RemainingToolCallsOperation, RetryOperation, SkillOperation,
+    SlashCommandOperation, StateMachine, StatusOperation, SteerOperation, SteerQueue, Step,
+    StopHookOperation, SubagentOperation, ToolApprovalOperation, ToolExecutionOperation,
+    ToolPairCompactionOperation,
 };
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::config::Config;
@@ -86,6 +87,8 @@ pub(crate) fn build_state_machine(
             Arc::clone(&extension_lease),
         )),
         Arc::new(RemainingToolCallsOperation::new(hook_manager.clone())),
+        // Before the foreground subagents, which hold the turn until one of them finishes.
+        Arc::new(BackgroundSubagentOperation::new(subagent_runner.clone())),
         Arc::new(
             SubagentOperation::new(Arc::new(subagent_runner)).with_max_concurrency(
                 Config::global()

@@ -9,10 +9,12 @@ pub(super) use crate::acp::response_builder::{
 };
 use crate::acp::tool_call_notifier::ToolCallNotifier;
 use crate::acp::{PermissionDecision, ACP_CURRENT_MODEL};
+use crate::agents::background_subagents::BackgroundSubagentEvent;
 use crate::agents::extension::{Envs, PLATFORM_EXTENSIONS};
 use crate::agents::mcp_client::GooseMcpHostInfo;
 use crate::agents::state_machine::{
-    has_unapplied_tool_confirmation_response, pending_tool_confirmations, turn_failure,
+    has_unapplied_tool_confirmation_response, pending_tool_confirmations, readable_subagent_output,
+    turn_failure,
 };
 use crate::agents::{
     Agent, AgentConfig, ExtensionConfig, ExtensionLoadResult, GoosePlatform, SessionConfig,
@@ -68,6 +70,7 @@ use anyhow::Result;
 use fs_err as fs;
 use futures::future::{BoxFuture, FutureExt};
 use futures::stream::{self, BoxStream, StreamExt};
+use goose_agent::subagent::{SubagentOutcome, SubagentUpdate};
 use goose_providers::documents::{document_media_type_is_supported, is_video_media_type};
 use goose_providers::errors::ProviderError;
 use rmcp::model::{
@@ -235,6 +238,9 @@ struct GooseAcpSession {
     agent: Arc<Agent>,
 }
 
+/// An event of a background subagent with the parent session's agent it runs on.
+type BackgroundSubagentEnvelope = (std::sync::Weak<Agent>, BackgroundSubagentEvent);
+
 struct AgentStreamOutcome {
     was_cancelled: bool,
     output_token_limit_reached: bool,
@@ -327,6 +333,8 @@ pub struct GooseAcpAgent {
     client_cx: OnceCell<ConnectionTo<Client>>,
     thinking_effort_update_tx: mpsc::UnboundedSender<String>,
     thinking_effort_update_rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
+    background_subagent_tx: mpsc::UnboundedSender<BackgroundSubagentEnvelope>,
+    background_subagent_rx: Mutex<Option<mpsc::UnboundedReceiver<BackgroundSubagentEnvelope>>>,
     config_dir: std::path::PathBuf,
     session_manager: Arc<SessionManager>,
     permission_manager: Arc<PermissionManager>,
@@ -976,6 +984,7 @@ impl GooseAcpAgent {
         );
         let agent_manager = Arc::new(AgentManager::new(agent_config, None).await?);
         let (thinking_effort_update_tx, thinking_effort_update_rx) = mpsc::unbounded_channel();
+        let (background_subagent_tx, background_subagent_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -993,6 +1002,8 @@ impl GooseAcpAgent {
             client_cx: OnceCell::new(),
             thinking_effort_update_tx,
             thinking_effort_update_rx: Mutex::new(Some(thinking_effort_update_rx)),
+            background_subagent_tx,
+            background_subagent_rx: Mutex::new(Some(background_subagent_rx)),
             config_dir: options.config_dir,
             session_manager,
             permission_manager,
@@ -1183,6 +1194,130 @@ impl GooseAcpAgent {
             .insert(session_id.clone(), acp_session);
         self.subscribe_thinking_effort_updates(&session_id, &agent)
             .await;
+        self.subscribe_background_subagents(&agent);
+    }
+
+    /// Hands the events of the agent's background subagents to the connection's forwarder.
+    /// An agent gives its event stream out once, so a session registered again (load,
+    /// another connection) does not forward the same event twice.
+    fn subscribe_background_subagents(&self, agent: &Arc<Agent>) {
+        let Some(mut events) = agent.background_subagents().take_events() else {
+            return;
+        };
+        let agent = Arc::downgrade(agent);
+        let tx = self.background_subagent_tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if tx.send((agent.clone(), event)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    async fn start_background_subagent_forwarder(self: &Arc<Self>, cx: &ConnectionTo<Client>) {
+        let Some(mut events) = self.background_subagent_rx.lock().await.take() else {
+            return;
+        };
+        let server = Arc::downgrade(self);
+        let cx = cx.clone();
+        tokio::spawn(async move {
+            while let Some((agent, event)) = events.recv().await {
+                let Some(server) = server.upgrade() else {
+                    break;
+                };
+                let Some(agent) = agent.upgrade() else {
+                    continue;
+                };
+                let subagent_id = event.subagent_id.clone();
+                if let Err(error) = server
+                    .forward_background_subagent_event(&cx, agent, event)
+                    .await
+                {
+                    warn!(%subagent_id, ?error, "Failed to forward a background subagent event");
+                }
+            }
+        });
+    }
+
+    /// A background subagent asks the parent for a decision (tool permission, form) the
+    /// same way a foreground one does inside the parent's turn; when it ends, the client
+    /// learns its result through `subagent_finished`, since that turn is over.
+    async fn forward_background_subagent_event(
+        &self,
+        cx: &ConnectionTo<Client>,
+        agent: Arc<Agent>,
+        event: BackgroundSubagentEvent,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let BackgroundSubagentEvent {
+            parent_session_id,
+            subagent_id,
+            update,
+        } = event;
+        if self
+            .closed_session_ids
+            .lock()
+            .await
+            .contains(&parent_session_id)
+        {
+            return Ok(());
+        }
+        let session_id = SessionId::new(parent_session_id.clone());
+        match update {
+            SubagentUpdate::ToParent(message) => {
+                let target = SessionAgentTarget {
+                    agent,
+                    session_id: parent_session_id,
+                    cancel_token: None,
+                };
+                let no_tool_requests = HashMap::new();
+                for content in &message.content {
+                    if matches!(content, MessageContent::ActionRequired(_)) {
+                        self.handle_message_content(
+                            content,
+                            &message,
+                            &session_id,
+                            &target,
+                            &no_tool_requests,
+                            cx,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            SubagentUpdate::Finished(outcome) => {
+                let (outcome, text) = match outcome {
+                    SubagentOutcome::Completed(output) => (
+                        SubagentFinishedOutcome::Completed,
+                        readable_subagent_output(&output),
+                    ),
+                    SubagentOutcome::Failed(reason) => (SubagentFinishedOutcome::Failed, reason),
+                    // Only a closed parent session cancels a background subagent.
+                    SubagentOutcome::Cancelled => return Ok(()),
+                };
+                if !self.supports_goose_custom_notifications() {
+                    warn!(%subagent_id, "client cannot receive the result of a background subagent");
+                    return Ok(());
+                }
+                let description = self
+                    .session_manager
+                    .get_session(&subagent_id, false)
+                    .await
+                    .map(|subagent| subagent.name)
+                    .unwrap_or_default();
+                cx.send_notification(GooseSessionNotification {
+                    session_id: parent_session_id,
+                    update: GooseSessionUpdate::SubagentFinished(SubagentFinishedUpdate {
+                        subagent_id,
+                        description,
+                        outcome,
+                        text,
+                    }),
+                })?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     async fn subscribe_thinking_effort_updates(&self, session_id: &str, agent: &Arc<Agent>) {
@@ -2743,7 +2878,12 @@ impl GooseAcpAgent {
         self.live_voice.stop_session_interaction(session_id).await;
 
         let mut sessions = self.sessions.lock().await;
-        sessions.remove(session_id);
+        if let Some(session) = sessions.remove(session_id) {
+            session
+                .agent
+                .background_subagents()
+                .cancel_for_parent(session_id);
+        }
         drop(sessions);
 
         self.agent_manager

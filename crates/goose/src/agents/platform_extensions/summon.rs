@@ -1,7 +1,7 @@
 use crate::agents::extension::PlatformExtensionContext;
 use crate::agents::final_output_tool::FinalOutputTool;
 use crate::agents::mcp_client::{Error, McpClientTrait};
-use crate::agents::state_machine::DELEGATED_META_KEY;
+use crate::agents::state_machine::{BACKGROUND_META_KEY, DELEGATED_META_KEY};
 use crate::agents::tool_execution::ToolCallContext;
 use crate::config::paths::Paths;
 use crate::config::{resolve_extensions_for_new_session, Config, GooseMode};
@@ -55,9 +55,13 @@ pub struct DelegateParams {
     pub context: Option<String>,
     pub working_dir: Option<String>,
     pub resume: Option<String>,
+    pub run_in_background: Option<bool>,
+    pub description: Option<String>,
 }
 
 const DEFAULT_RESUME_INSTRUCTIONS: &str = "Continue the task from where you left off.";
+const DEFAULT_SUBAGENT_NAME: &str = "Delegated task";
+const BACKGROUND_NOTE: &str = "You will be notified with its result when it finishes; do not wait, sleep or poll for it. Continue with other work or end your turn.";
 
 struct SubagentConfig {
     provider_name: String,
@@ -392,16 +396,21 @@ pub fn discover_filesystem_sources(working_dir: &Path) -> Vec<SourceEntry> {
     sources
 }
 
-fn delegated_result(text: String, subagent_id: &str) -> CallToolResult {
+/// A foreground delegation runs inside the parent's turn (`SubagentOperation`); a background
+/// one runs detached from it (`BackgroundSubagentOperation`) and reports when it ends.
+fn delegated_result(text: String, subagent_id: &str, background: bool) -> CallToolResult {
     let mut meta = MetaObject::new();
     meta.0.insert(
         "subagent_session_id".to_string(),
         serde_json::Value::String(subagent_id.to_string()),
     );
-    meta.0.insert(
-        DELEGATED_META_KEY.to_string(),
-        serde_json::Value::Bool(true),
-    );
+    let key = if background {
+        BACKGROUND_META_KEY
+    } else {
+        DELEGATED_META_KEY
+    };
+    meta.0
+        .insert(key.to_string(), serde_json::Value::Bool(true));
     CallToolResult::success(vec![ContentBlock::text(text)]).with_meta(Some(meta))
 }
 
@@ -595,7 +604,15 @@ impl SummonClient {
                 },
                 "resume": {
                     "type": "string",
-                    "description": "Subagent ID of a failed or cancelled delegate to continue. Only `instructions` can be combined with it."
+                    "description": "Subagent ID of an earlier delegate to continue with its full context: a failed or cancelled one, or a completed one you send a follow-up. Only `instructions` and `run_in_background` can be combined with it."
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Set to true to run this delegate in the background while you keep working. You will be notified with its result when it finishes."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "A short (3-5 word) description of the task, shown to the user."
                 }
             }
         });
@@ -607,7 +624,8 @@ impl SummonClient {
              1. Ad-hoc: Provide `instructions` for a custom task\n\
              2. Source-based: Provide `source` name to run a subrecipe, recipe, or agent\n\
              3. Combined: Pair a source with a task (e.g., source: \"deploy\", instructions: \"deploy to staging\")\n\
-             4. Resume: Provide `resume` with the subagent ID of a failed or cancelled delegate to continue it instead of starting over. If the user says to continue after a stop, resume the ones from the latest stop unless they name others. Completed delegates cannot be resumed.\n\n\
+             4. Resume: Provide `resume` with the subagent ID of an earlier delegate to continue it with its full context instead of starting over: a failed or cancelled one, or a completed one you send a follow-up in `instructions`. If the user says to continue after a stop, resume the ones from the latest stop unless they name others.\n\n\
+             Background: With `run_in_background: true` the delegate runs while you keep working and you are notified with its result when it finishes; do not wait, sleep or poll for it. Use it when you have other work to do meanwhile; when you need the result before you can continue, run it in the foreground.\n\n\
              When to delegate:\n\
              - A delegate costs more than it seems: you only see its final report, and its mistakes sound as sure as its findings.\n\
              - Delegate independent work that can run on its own, a side task that should not fill your context, or reading across many files when you only need the conclusion.\n\
@@ -968,12 +986,13 @@ impl SummonClient {
             return Err("Delegated tasks cannot spawn further delegations".to_string());
         }
 
+        let background = params.run_in_background.unwrap_or(false);
         if let Some(subagent_id) = &params.resume {
             return self
-                .resume_subagent(subagent_id, params.instructions, &session.id)
+                .resume_subagent(subagent_id, params.instructions, &session.id, background)
                 .await;
         }
-        self.create_subagent(params, &session).await
+        self.create_subagent(params, &session, background).await
     }
 
     async fn resume_subagent(
@@ -981,6 +1000,7 @@ impl SummonClient {
         subagent_id: &str,
         instructions: Option<String>,
         parent_id: &str,
+        background: bool,
     ) -> Result<CallToolResult, String> {
         let session_manager = &self.context.session_manager;
         let subagent = session_manager
@@ -994,14 +1014,6 @@ impl SummonClient {
                 "Subagent {subagent_id} does not belong to this session"
             ));
         }
-        if subagent
-            .conversation
-            .as_ref()
-            .and_then(|conversation| FinalOutputTool::successful_output(conversation.messages()))
-            .is_some()
-        {
-            return Err(format!("Subagent {subagent_id} already completed"));
-        }
 
         let instructions = instructions.unwrap_or_else(|| DEFAULT_RESUME_INSTRUCTIONS.to_string());
         session_manager
@@ -1009,16 +1021,19 @@ impl SummonClient {
             .await
             .map_err(|e| format!("Failed to save the resume instructions: {e}"))?;
 
-        Ok(delegated_result(
-            format!("Resumed subagent {subagent_id}"),
-            subagent_id,
-        ))
+        let text = if background {
+            format!("Resumed subagent {subagent_id} in the background. {BACKGROUND_NOTE}")
+        } else {
+            format!("Resumed subagent {subagent_id}")
+        };
+        Ok(delegated_result(text, subagent_id, background))
     }
 
     async fn create_subagent(
         &self,
         params: DelegateParams,
         parent: &Session,
+        background: bool,
     ) -> Result<CallToolResult, String> {
         let mut recipe = self
             .build_delegate_recipe(&params, &parent.id, &parent.working_dir)
@@ -1068,12 +1083,17 @@ impl SummonClient {
             .to_extension_data(&mut extension_data)
             .map_err(|e| format!("Failed to save delegate extensions: {e}"))?;
 
+        let name = params
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .map_or_else(
+                || DEFAULT_SUBAGENT_NAME.to_string(),
+                |description| safe_truncate(description, SUBAGENT_DESCRIPTION_BUDGET),
+            );
         let child = self
-            .create_subagent_session(
-                &subagent_config.working_dir,
-                &parent.id,
-                "Delegated task".to_string(),
-            )
+            .create_subagent_session(&subagent_config.working_dir, &parent.id, name)
             .await?;
         let task = recipe
             .prompt
@@ -1099,10 +1119,15 @@ impl SummonClient {
             .await
             .map_err(|e| format!("Failed to save delegate task: {e}"))?;
 
-        Ok(delegated_result(
-            format!("Delegated to subagent {}", child.id),
-            &child.id,
-        ))
+        let text = if background {
+            format!(
+                "Started subagent {} in the background. {BACKGROUND_NOTE}",
+                child.id
+            )
+        } else {
+            format!("Delegated to subagent {}", child.id)
+        };
+        Ok(delegated_result(text, &child.id, background))
     }
 
     fn validate_resume_params(&self, params: &DelegateParams) -> Result<(), String> {
@@ -1116,13 +1141,14 @@ impl SummonClient {
             ("context", params.context.is_some()),
             ("working_dir", params.working_dir.is_some()),
             ("max_turns", params.max_turns.is_some()),
+            ("description", params.description.is_some()),
         ]
         .into_iter()
         .filter_map(|(name, set)| set.then_some(name))
         .collect();
         if !conflicting.is_empty() {
             return Err(format!(
-                "'resume' only accepts 'instructions'; remove {}",
+                "'resume' only accepts 'instructions' and 'run_in_background'; remove {}",
                 conflicting.join(", ")
             ));
         }
@@ -1961,22 +1987,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegate_resume_rejects_subagents_it_cannot_resume() -> Result<()> {
+    async fn delegate_resume_sends_a_completed_subagent_a_follow_up_in_the_background() -> Result<()>
+    {
         let temp_dir = TempDir::new()?;
         let manager = Arc::new(crate::session::SessionManager::new(
             temp_dir.path().to_path_buf(),
         ));
         let parent = create_session(&manager, &temp_dir, SessionType::User, None).await?;
-        let other_parent = create_session(&manager, &temp_dir, SessionType::User, None).await?;
-        let subagent =
-            create_session(&manager, &temp_dir, SessionType::SubAgent, Some(&parent.id)).await?;
-        let others = create_session(
-            &manager,
-            &temp_dir,
-            SessionType::SubAgent,
-            Some(&other_parent.id),
-        )
-        .await?;
         let completed =
             create_session(&manager, &temp_dir, SessionType::SubAgent, Some(&parent.id)).await?;
         let arguments = serde_json::json!({"summary": "done"})
@@ -2008,16 +2025,57 @@ mod tests {
             .await?;
         let client = SummonClient::new(create_test_context_with_session_manager(manager.clone()))?;
 
+        let result = resume(
+            &client,
+            &parent.id,
+            serde_json::json!({
+                "resume": completed.id,
+                "instructions": "Now check the tests too",
+                "run_in_background": true
+            }),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        let meta = result.meta.as_ref().unwrap();
+        assert_eq!(
+            meta.0.get(BACKGROUND_META_KEY),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(meta.0.get(DELEGATED_META_KEY), None);
+        let resumed = manager.get_session(&completed.id, true).await?;
+        let messages = resumed.conversation.as_ref().unwrap().messages();
+        assert_eq!(
+            messages.last().unwrap().as_concat_text(),
+            "Now check the tests too"
+        );
+        assert_eq!(FinalOutputTool::successful_output(messages), None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegate_resume_rejects_subagents_it_cannot_resume() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let manager = Arc::new(crate::session::SessionManager::new(
+            temp_dir.path().to_path_buf(),
+        ));
+        let parent = create_session(&manager, &temp_dir, SessionType::User, None).await?;
+        let other_parent = create_session(&manager, &temp_dir, SessionType::User, None).await?;
+        let subagent =
+            create_session(&manager, &temp_dir, SessionType::SubAgent, Some(&parent.id)).await?;
+        let others = create_session(
+            &manager,
+            &temp_dir,
+            SessionType::SubAgent,
+            Some(&other_parent.id),
+        )
+        .await?;
+        let client = SummonClient::new(create_test_context_with_session_manager(manager.clone()))?;
+
         for (session_id, args, expected) in [
             (
                 &parent.id,
                 serde_json::json!({"resume": others.id}),
                 "does not belong to this session",
-            ),
-            (
-                &parent.id,
-                serde_json::json!({"resume": completed.id}),
-                "already completed",
             ),
             (
                 &parent.id,
@@ -2032,12 +2090,17 @@ mod tests {
             (
                 &parent.id,
                 serde_json::json!({"resume": subagent.id, "model": "other"}),
-                "'resume' only accepts 'instructions'; remove model",
+                "'resume' only accepts 'instructions' and 'run_in_background'; remove model",
             ),
             (
                 &parent.id,
                 serde_json::json!({"resume": subagent.id, "max_turns": 5}),
-                "'resume' only accepts 'instructions'; remove max_turns",
+                "'resume' only accepts 'instructions' and 'run_in_background'; remove max_turns",
+            ),
+            (
+                &parent.id,
+                serde_json::json!({"resume": subagent.id, "description": "x"}),
+                "'resume' only accepts 'instructions' and 'run_in_background'; remove description",
             ),
         ] {
             let error = resume(&client, session_id, args.clone()).await.unwrap_err();

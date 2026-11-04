@@ -6942,6 +6942,19 @@
           "required": [
             "sessionUpdate"
           ]
+        },
+        {
+          "$ref": "#/$defs/SubagentFinishedUpdate",
+          "type": "object",
+          "properties": {
+            "sessionUpdate": {
+              "type": "string",
+              "const": "subagent_finished"
+            }
+          },
+          "required": [
+            "sessionUpdate"
+          ]
         }
       ],
       "description": "Discriminated union of goose-specific session update payloads.\nVariant tag matches ACP's convention (`sessionUpdate: \"<snake_case>\"`).\n\n`discriminator.mapping` is what makes TS codegen (`@hey-api/openapi-ts`)\nemit the correct snake_case tag value even when this enum has a single\nvariant. Add a mapping entry per variant.",
@@ -6951,7 +6964,8 @@
           "usage_update": "#/$defs/SessionUsageUpdate",
           "status_message": "#/$defs/StatusMessageUpdate",
           "message_usage": "#/$defs/MessageUsageUpdate",
-          "live_voice_interaction_ended": "#/$defs/LiveVoiceInteractionEndedUpdate"
+          "live_voice_interaction_ended": "#/$defs/LiveVoiceInteractionEndedUpdate",
+          "subagent_finished": "#/$defs/SubagentFinishedUpdate"
         }
       }
     },
@@ -7165,6 +7179,39 @@
         "interactionId",
         "outcome"
       ]
+    },
+    "SubagentFinishedOutcome": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed"
+      ]
+    },
+    "SubagentFinishedUpdate": {
+      "type": "object",
+      "properties": {
+        "subagentId": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "description": "The `description` the delegate was started with, else a generic name."
+        },
+        "outcome": {
+          "$ref": "#/$defs/SubagentFinishedOutcome"
+        },
+        "text": {
+          "type": "string",
+          "description": "Completed: the subagent's report. Failed: why it failed."
+        }
+      },
+      "required": [
+        "subagentId",
+        "description",
+        "outcome",
+        "text"
+      ],
+      "description": "A subagent started with `delegate(run_in_background: true)` ended. The parent's turn\nthat started it is over, so the client brings the result into the parent session,\ne.g. as a new prompt."
     },
     "ProviderDeviceCodeNotification_unstable": {
       "type": "object",

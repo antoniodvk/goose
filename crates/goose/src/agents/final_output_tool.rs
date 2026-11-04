@@ -3,7 +3,7 @@ use crate::conversation::message::{Message, MessageContent};
 use crate::recipe::Response;
 use indoc::formatdoc;
 use rmcp::model::{
-    CallToolRequestParams, ContentBlock, ErrorCode, ErrorData, Tool, ToolAnnotations,
+    CallToolRequestParams, ContentBlock, ErrorCode, ErrorData, Role, Tool, ToolAnnotations,
 };
 use serde_json::Value;
 use std::borrow::Cow;
@@ -24,6 +24,18 @@ pub(crate) fn structured_output_unsupported_message(provider_name: &str) -> Stri
          model can never satisfy this recipe. Remove the entire `response` block from the recipe \
          or run it with a different provider."
     )
+}
+
+fn is_user_text(message: &Message) -> bool {
+    message.role == Role::User
+        && message
+            .content
+            .iter()
+            .any(|content| matches!(content, MessageContent::Text(_)))
+        && !message
+            .content
+            .iter()
+            .any(|content| matches!(content, MessageContent::ToolResponse(_)))
 }
 
 pub struct FinalOutputTool {
@@ -52,7 +64,15 @@ impl FinalOutputTool {
         })
     }
 
+    /// The final output accepted since the latest user text message. A follow-up message to a
+    /// finished subagent (`delegate` with `resume`) asks for new work, so the earlier output
+    /// no longer counts and the subagent has to report again.
     pub(crate) fn successful_output(messages: &[Message]) -> Option<String> {
+        let since = messages
+            .iter()
+            .rposition(is_user_text)
+            .map_or(0, |index| index + 1);
+        let messages = &messages[since..];
         let successful_responses: HashSet<&str> = messages
             .iter()
             .flat_map(|message| &message.content)
@@ -344,5 +364,41 @@ mod tests {
         let final_output = tool.final_output.unwrap();
         assert!(serde_json::from_str::<Value>(&final_output).is_ok());
         assert!(!final_output.contains('\n'));
+    }
+
+    fn final_output_call(id: &str, summary: &str) -> [Message; 2] {
+        [
+            Message::assistant().with_tool_request(
+                id,
+                Ok(CallToolRequestParams::new(FINAL_OUTPUT_TOOL_NAME)
+                    .with_arguments(object!({ "summary": summary }))),
+            ),
+            Message::user().with_tool_response(
+                id,
+                Ok(rmcp::model::CallToolResult::success(vec![
+                    ContentBlock::text(FINAL_OUTPUT_SUCCESS_MESSAGE),
+                ])),
+            ),
+        ]
+    }
+
+    #[test]
+    fn successful_output_only_counts_since_the_latest_user_text() {
+        let mut messages = vec![Message::user().with_text("Subagent ID: s\n\nSummarize")];
+        messages.extend(final_output_call("first", "first report"));
+        assert_eq!(
+            FinalOutputTool::successful_output(&messages).as_deref(),
+            Some(r#"{"summary":"first report"}"#)
+        );
+
+        messages.push(Message::user().with_text("Also check the tests"));
+        assert_eq!(FinalOutputTool::successful_output(&messages), None);
+
+        messages.push(Message::assistant().with_text("Checking"));
+        messages.extend(final_output_call("second", "second report"));
+        assert_eq!(
+            FinalOutputTool::successful_output(&messages).as_deref(),
+            Some(r#"{"summary":"second report"}"#)
+        );
     }
 }

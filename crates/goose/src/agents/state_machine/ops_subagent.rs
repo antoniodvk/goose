@@ -1,3 +1,4 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::future;
 use futures::stream::{self, BoxStream, StreamExt};
@@ -5,15 +6,22 @@ use goose_agent::subagent::{SubagentOutcome, SubagentRunner, SubagentUpdate};
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::final_output_tool::FinalOutputTool;
-use crate::agents::state_machine::Emitter;
+use crate::agents::state_machine::{
+    messages_since_kickoff, not_applicable, Emitter, GooseEffect, Operation, OperationResult,
+};
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::conversation::message::{Message, MessageContent, SystemNotificationType};
+use crate::conversation::Conversation;
 use crate::session::{Session, SessionType};
 use crate::utils::safe_truncate;
 
 // Predates background subagents' removal and lives on in session histories, where older
 // histories still hold background delegations marked `false`.
 pub(crate) const DELEGATED_META_KEY: &str = "foreground_subagent";
+/// A delegation that runs detached from the parent's turn (`delegate` with
+/// `run_in_background`). A new key, so the removed background delegations of older
+/// histories (`foreground_subagent: false`) never start.
+pub(crate) const BACKGROUND_META_KEY: &str = "background_subagent";
 const TASK_SNIPPET_CHARS: usize = 160;
 
 fn inline_notice(text: String) -> Message {
@@ -58,23 +66,76 @@ fn ended(outcome: SubagentOutcome) -> BoxStream<'static, SubagentUpdate> {
     ))))
 }
 
-fn delegated_subagent_ids(content: &[MessageContent]) -> impl Iterator<Item = &str> {
-    content.iter().filter_map(|content| {
+/// (tool call id, subagent session id) of every successful delegation marked with `key`.
+fn delegations<'a>(
+    content: &'a [MessageContent],
+    key: &'a str,
+) -> impl Iterator<Item = (&'a str, &'a str)> {
+    content.iter().filter_map(move |content| {
         let MessageContent::ToolResponse(response) = content else {
             return None;
         };
         let result = response.tool_result.as_ref().ok()?;
         let meta = result.meta.as_ref()?;
-        if result.is_error == Some(true)
-            || meta.0.get(DELEGATED_META_KEY) != Some(&serde_json::Value::Bool(true))
+        if result.is_error == Some(true) || meta.0.get(key) != Some(&serde_json::Value::Bool(true))
         {
             return None;
         }
-        meta.0.get("subagent_session_id")?.as_str()
+        Some((
+            response.id.as_str(),
+            meta.0.get("subagent_session_id")?.as_str()?,
+        ))
     })
 }
 
-fn readable_output(output: &str) -> String {
+fn delegated_subagent_ids(content: &[MessageContent]) -> impl Iterator<Item = &str> {
+    delegations(content, DELEGATED_META_KEY).map(|(_, subagent_id)| subagent_id)
+}
+
+/// Starts the background delegations of the current turn. They run on the parent's agent
+/// (`BackgroundSubagents`) and outlive the turn; this operation never changes the
+/// conversation, the result arrives later as a message of its own.
+pub(crate) struct BackgroundSubagentOperation {
+    runner: ForegroundSubagentRunner,
+}
+
+impl BackgroundSubagentOperation {
+    pub(crate) fn new(runner: ForegroundSubagentRunner) -> Self {
+        Self { runner }
+    }
+}
+
+#[async_trait]
+impl Operation<Session, GooseEffect> for BackgroundSubagentOperation {
+    fn name(&self) -> &'static str {
+        "background_subagent"
+    }
+
+    async fn run(
+        &self,
+        session: &Session,
+        conversation: &Conversation,
+        _emit: &Emitter,
+    ) -> Result<OperationResult<GooseEffect>> {
+        if session.session_type == SessionType::SubAgent {
+            return not_applicable();
+        }
+        let Ok(turn) = messages_since_kickoff(conversation) else {
+            return not_applicable();
+        };
+        for message in turn {
+            for (call_id, subagent_id) in delegations(&message.content, BACKGROUND_META_KEY) {
+                self.runner
+                    .background()
+                    .start(&self.runner, session, call_id, subagent_id)
+                    .await;
+            }
+        }
+        not_applicable()
+    }
+}
+
+pub(crate) fn readable_output(output: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(output) {
         Ok(serde_json::Value::Object(fields)) if fields.len() == 1 => fields
             .get("summary")
@@ -370,6 +431,81 @@ mod tests {
                 ),
             )
             .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn background_delegations_of_the_turn_start_once_and_report_their_end() -> Result<()> {
+        let fixture = fixture().await?;
+        let background_id = fixture
+            .manager
+            .create_session(
+                fixture.temp_dir.path().to_path_buf(),
+                "background".to_string(),
+                SessionType::SubAgent,
+                GooseMode::Auto,
+            )
+            .await?
+            .id;
+        fixture
+            .manager
+            .update(&background_id)
+            .parent_session_id(Some(fixture.parent_id.clone()))
+            .apply()
+            .await?;
+        save_final_output(&fixture.manager, &background_id).await?;
+        let mut meta = MetaObject::new();
+        meta.0.insert(
+            BACKGROUND_META_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        meta.0.insert(
+            "subagent_session_id".to_string(),
+            serde_json::Value::String(background_id.clone()),
+        );
+        fixture
+            .manager
+            .add_message(
+                &fixture.parent_id,
+                &Message::user().with_tool_response(
+                    "background-call",
+                    Ok(CallToolResult::success(vec![ContentBlock::text("Started")])
+                        .with_meta(Some(meta))),
+                ),
+            )
+            .await?;
+
+        let runner = fixture.runner();
+        let mut events = runner.background().take_events().expect("first take");
+        assert!(runner.background().take_events().is_none());
+        let operation = BackgroundSubagentOperation::new(runner);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let emit = Emitter::new(tx, CancellationToken::new());
+        let parent = fixture
+            .manager
+            .get_session(&fixture.parent_id, true)
+            .await?;
+        let conversation = parent.conversation.as_ref().unwrap();
+
+        for _ in 0..2 {
+            let result =
+                Operation::<Session, GooseEffect>::run(&operation, &parent, conversation, &emit)
+                    .await?;
+            assert!(matches!(result, OperationResult::NotApplicable));
+        }
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await?
+            .expect("an event");
+        assert_eq!(event.parent_session_id, fixture.parent_id);
+        assert_eq!(event.subagent_id, background_id);
+        let SubagentUpdate::Finished(SubagentOutcome::Completed(output)) = event.update else {
+            panic!("expected the background subagent to complete");
+        };
+        assert_eq!(readable_output(&output), "done");
+        // The foreground delegation of the fixture is not started, the background one once.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(events.try_recv().is_err());
         Ok(())
     }
 

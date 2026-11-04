@@ -27,7 +27,8 @@ pub struct GooseSessionNotification {
         "usage_update": "#/$defs/SessionUsageUpdate",
         "status_message": "#/$defs/StatusMessageUpdate",
         "message_usage": "#/$defs/MessageUsageUpdate",
-        "live_voice_interaction_ended": "#/$defs/LiveVoiceInteractionEndedUpdate"
+        "live_voice_interaction_ended": "#/$defs/LiveVoiceInteractionEndedUpdate",
+        "subagent_finished": "#/$defs/SubagentFinishedUpdate"
     }
 }))]
 pub enum GooseSessionUpdate {
@@ -35,6 +36,28 @@ pub enum GooseSessionUpdate {
     StatusMessage(StatusMessageUpdate),
     MessageUsage(MessageUsageUpdate),
     LiveVoiceInteractionEnded(LiveVoiceInteractionEndedUpdate),
+    SubagentFinished(SubagentFinishedUpdate),
+}
+
+/// A subagent started with `delegate(run_in_background: true)` ended. The parent's turn
+/// that started it is over, so the client brings the result into the parent session,
+/// e.g. as a new prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentFinishedUpdate {
+    pub subagent_id: String,
+    /// The `description` the delegate was started with, else a generic name.
+    pub description: String,
+    pub outcome: SubagentFinishedOutcome,
+    /// Completed: the subagent's report. Failed: why it failed.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentFinishedOutcome {
+    Completed,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

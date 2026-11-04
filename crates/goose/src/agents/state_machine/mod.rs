@@ -72,7 +72,10 @@ pub(super) use ops_slash_command::SlashCommandOperation;
 pub(super) use ops_status::StatusOperation;
 pub(super) use ops_steer::{SteerOperation, SteerQueue};
 pub(super) use ops_stop_hook::StopHookOperation;
-pub(super) use ops_subagent::DELEGATED_META_KEY;
+pub(crate) use ops_subagent::readable_output as readable_subagent_output;
+pub(super) use ops_subagent::{
+    BackgroundSubagentOperation, BACKGROUND_META_KEY, DELEGATED_META_KEY,
+};
 pub(super) use ops_tool_approval::ToolApprovalOperation;
 pub(super) use ops_tool_pair_compaction::ToolPairCompactionOperation;
 pub(super) use ops_toolcalling::ToolExecutionOperation;
