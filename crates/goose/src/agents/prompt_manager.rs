@@ -41,6 +41,7 @@ pub struct SystemPromptBuilder<'a, M> {
     manager: &'a M,
 
     system_prompt_override: Option<String>,
+    base_template: &'static str,
     extensions_info: Vec<ExtensionInfo>,
     prompt_extras: IndexMap<String, String>,
     hints: Option<String>,
@@ -49,9 +50,25 @@ pub struct SystemPromptBuilder<'a, M> {
     goose_mode: Option<GooseMode>,
 }
 
+/// Claude models that goose drives itself (Anthropic API, OpenRouter, any other provider) get the
+/// working rules of Claude Code instead of the generic base prompt (A48). Agent providers such as
+/// claude-acp run Claude Code's own prompt and ignore goose's.
+fn base_template_for(session: &Session) -> &'static str {
+    let is_claude = session
+        .model_config
+        .as_ref()
+        .is_some_and(|model| model.model_name.to_ascii_lowercase().contains("claude"));
+    if is_claude {
+        "claude_system.md"
+    } else {
+        "system.md"
+    }
+}
+
 impl<'a> SystemPromptBuilder<'a, PromptManager> {
     pub fn with_session(mut self, session: &Session) -> Self {
         self.system_prompt_override = session.system_prompt_override.clone();
+        self.base_template = base_template_for(session);
         self.prompt_extras
             .extend(session.system_prompt_extras.clone());
         self
@@ -136,7 +153,7 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
             let sanitized_override_prompt = sanitize_unicode_tags(override_prompt);
             prompt_template::render_string(&sanitized_override_prompt, &context)
         } else {
-            prompt_template::render_template("system.md", &context)
+            prompt_template::render_template(self.base_template, &context)
         }
         .map_err(|error| anyhow::anyhow!("Could not render system prompt: {error}"))?;
 
@@ -207,6 +224,7 @@ impl PromptManager {
             manager: self,
 
             system_prompt_override: None,
+            base_template: "system.md",
             extensions_info: vec![],
             prompt_extras: IndexMap::new(),
             hints: None,
@@ -243,6 +261,42 @@ mod tests {
         assert!(!result.contains('\u{E0043}'));
         assert!(result.contains("System prompt"));
         assert!(result.contains("with hidden text"));
+    }
+
+    fn session_with_model(model_name: &str) -> Session {
+        Session {
+            model_config: Some(goose_providers::model::ModelConfig::new(model_name)),
+            ..Session::default()
+        }
+    }
+
+    #[test]
+    fn claude_models_get_claude_code_working_rules() {
+        let manager = PromptManager::with_timestamp(DateTime::<Utc>::from_timestamp(0, 0).unwrap());
+        const RULE: &str = "using your own judgment along the way";
+
+        for model in ["claude-opus-5-5", "anthropic/claude-sonnet-5.5"] {
+            let prompt = manager
+                .builder()
+                .with_session(&session_with_model(model))
+                .build()
+                .unwrap();
+            assert!(prompt.contains(RULE), "{model} should get claude_system.md");
+            assert!(prompt.contains("# Turn Context"), "{model} keeps the turn context block");
+        }
+
+        let other = manager
+            .builder()
+            .with_session(&session_with_model("deepseek/deepseek-v4.1-flash"))
+            .build()
+            .unwrap();
+        assert!(!other.contains(RULE));
+        assert!(other.contains("# Response Guidelines"));
+
+        let mut overridden = session_with_model("claude-opus-5-5");
+        overridden.system_prompt_override = Some("CUSTOM".to_string());
+        let custom = manager.builder().with_session(&overridden).build().unwrap();
+        assert_eq!(custom, "CUSTOM");
     }
 
     #[test]

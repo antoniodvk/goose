@@ -12,6 +12,10 @@ static TEMPLATE_REGISTRY: &[(&str, &str)] = &[
         "Main system prompt that defines goose's personality and behavior",
     ),
     (
+        "claude_system.md",
+        "Main system prompt for Claude models goose drives itself, with Claude Code's working rules",
+    ),
+    (
         "compaction.md",
         "Prompt for summarizing conversation history when context limits are reached",
     ),
