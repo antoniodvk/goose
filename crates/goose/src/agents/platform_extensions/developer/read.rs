@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::edit::resolve_path;
+use super::encoding::Bom;
 
 /// Lines returned when the caller gives no limit (same default as Claude Code's Read).
 const DEFAULT_LINE_LIMIT: usize = 2000;
@@ -149,38 +150,31 @@ struct Decoded {
 
 /// Decodes UTF-8 (with or without BOM) and UTF-16 with BOM; refuses other binary data.
 fn decode_text(bytes: &[u8]) -> Result<Decoded, &'static str> {
-    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return Ok(Decoded {
-            text: String::from_utf8_lossy(rest).into_owned(),
-            note: None,
-        });
-    }
-    let utf16 = |rest: &[u8], big_endian: bool| {
-        let units: Vec<u16> = rest
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| {
-                if big_endian {
-                    u16::from_be_bytes(*pair)
-                } else {
-                    u16::from_le_bytes(*pair)
-                }
-            })
-            .collect();
-        String::from_utf16_lossy(&units)
-    };
-    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        return Ok(Decoded {
-            text: utf16(rest, false),
-            note: Some("File is UTF-16 LE (BOM), shown decoded. edit and write handle UTF-8 only."),
-        });
-    }
-    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        return Ok(Decoded {
-            text: utf16(rest, true),
-            note: Some("File is UTF-16 BE (BOM), shown decoded. edit and write handle UTF-8 only."),
-        });
+    let (bom, body) = Bom::detect(bytes);
+    match bom {
+        Bom::Utf8 => {
+            return Ok(Decoded {
+                text: bom.decode_lossy(body),
+                note: None,
+            });
+        }
+        Bom::Utf16Le => {
+            return Ok(Decoded {
+                text: bom.decode_lossy(body),
+                note: Some(
+                    "File is UTF-16 LE (BOM), shown decoded. edit and write keep this encoding.",
+                ),
+            });
+        }
+        Bom::Utf16Be => {
+            return Ok(Decoded {
+                text: bom.decode_lossy(body),
+                note: Some(
+                    "File is UTF-16 BE (BOM), shown decoded. edit and write keep this encoding.",
+                ),
+            });
+        }
+        Bom::None => {}
     }
     if bytes.iter().take(8192).any(|byte| *byte == 0) {
         return Err(

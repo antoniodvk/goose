@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::encoding::Bom;
 use rmcp::model::{Annotations, CallToolResult, ContentBlock, TextContent};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -60,14 +61,20 @@ impl EditTools {
         }
 
         let is_new = !path.exists();
+        // An existing file keeps its encoding; a new file is UTF-8.
+        let bom = Bom::detect_in_file(&path);
 
-        match fs::write(path, &params.content) {
+        match fs::write(&path, bom.encode(&params.content)) {
             Ok(()) => {
                 let line_count = params.content.lines().count();
                 let action = if is_new { "Created" } else { "Wrote" };
+                let encoding = bom
+                    .label()
+                    .map(|label| format!(", {label} kept"))
+                    .unwrap_or_default();
                 CallToolResult::success(vec![visible_text(format!(
-                    "{} {} ({} lines)",
-                    action, params.path, line_count
+                    "{} {} ({} lines{})",
+                    action, params.path, line_count, encoding
                 ))])
             }
             Err(error) => CallToolResult::error(vec![visible_text(format!(
@@ -88,12 +95,22 @@ impl EditTools {
     ) -> CallToolResult {
         let path = resolve_path(&params.path, working_dir);
 
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
             Err(error) => {
                 return CallToolResult::error(vec![visible_text(format!(
                     "Failed to read {}: {}",
                     params.path, error
+                ))]);
+            }
+        };
+        let (bom, body) = Bom::detect(&bytes);
+        let content = match bom.decode_strict(body) {
+            Ok(text) => text,
+            Err(reason) => {
+                return CallToolResult::error(vec![visible_text(format!(
+                    "Failed to read {}: {}. edit would corrupt it.",
+                    params.path, reason
                 ))]);
             }
         };
@@ -105,7 +122,7 @@ impl EditTools {
                     return CallToolResult::error(vec![visible_text(msg)]);
                 }
             };
-        match fs::write(&path, &new_content) {
+        match fs::write(&path, bom.encode(&new_content)) {
             Ok(()) => {
                 if params.replace_all {
                     let count = content
@@ -536,5 +553,125 @@ mod tests {
             fs::read_to_string(dir.path().join("relative-edit.txt")).unwrap(),
             "after"
         );
+    }
+
+    fn edit_params(path: &std::path::Path, before: &str, after: &str, all: bool) -> FileEditParams {
+        FileEditParams {
+            path: path.to_string_lossy().to_string(),
+            before: before.to_string(),
+            after: after.to_string(),
+            replace_all: all,
+        }
+    }
+
+    #[test]
+    fn test_file_edit_keeps_utf16_encoding() {
+        let dir = setup();
+        let tools = EditTools::new();
+        for bom in [Bom::Utf16Le, Bom::Utf16Be] {
+            let path = dir.path().join(format!("{bom:?}.txt"));
+            fs::write(&path, bom.encode("grün\r\nzwei\r\ndrei\r\n")).unwrap();
+
+            let result = tools.file_edit(edit_params(&path, "grün\nzwei", "blau\n😀", false));
+
+            assert!(
+                !result.is_error.unwrap_or(false),
+                "{}",
+                extract_text(&result)
+            );
+            assert!(extract_text(&result).ends_with("(2 lines -> 2 lines) at line 1"));
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                bom.encode("blau\r\n😀\r\ndrei\r\n"),
+                "{bom:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_file_edit_replace_all_in_utf16() {
+        let dir = setup();
+        let path = dir.path().join("all.txt");
+        fs::write(&path, Bom::Utf16Le.encode("foo\nbar\nfoo\n")).unwrap();
+
+        let result = EditTools::new().file_edit(edit_params(&path, "foo", "qux", true));
+
+        assert!(extract_text(&result).ends_with("(2 replacements)"));
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            Bom::Utf16Le.encode("qux\nbar\nqux\n")
+        );
+    }
+
+    #[test]
+    fn test_file_edit_keeps_utf8_bom() {
+        let dir = setup();
+        let path = dir.path().join("bom.txt");
+        fs::write(&path, Bom::Utf8.encode("alpha\nbeta")).unwrap();
+
+        let result = EditTools::new().file_edit(edit_params(&path, "alpha", "gamma", false));
+
+        assert!(!result.is_error.unwrap_or(false));
+        assert_eq!(fs::read(&path).unwrap(), Bom::Utf8.encode("gamma\nbeta"));
+    }
+
+    #[test]
+    fn test_file_edit_refuses_files_it_cannot_decode_exactly() {
+        let dir = setup();
+        let tools = EditTools::new();
+        let latin = dir.path().join("latin.txt");
+        fs::write(&latin, b"caf\xE9 a").unwrap();
+        let odd = dir.path().join("odd.txt");
+        let odd_bytes = [0xFF, 0xFE, b'a', 0, b'b'];
+        fs::write(&odd, odd_bytes).unwrap();
+
+        for path in [&latin, &odd] {
+            let before = fs::read(path).unwrap();
+            let result = tools.file_edit(edit_params(path, "a", "b", false));
+            assert!(result.is_error.unwrap_or(false));
+            assert!(extract_text(&result).contains("would corrupt it"));
+            assert_eq!(fs::read(path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn test_file_write_keeps_existing_encoding() {
+        let dir = setup();
+        let tools = EditTools::new();
+        for bom in [Bom::Utf16Le, Bom::Utf16Be, Bom::Utf8] {
+            let path = dir.path().join(format!("{bom:?}.txt"));
+            fs::write(&path, bom.encode("old")).unwrap();
+
+            let result = tools.file_write(FileWriteParams {
+                path: path.to_string_lossy().to_string(),
+                content: "neu ü\nzwei".to_string(),
+            });
+
+            assert!(!result.is_error.unwrap_or(false));
+            assert!(extract_text(&result).contains(&format!("{} kept", bom.label().unwrap())));
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                bom.encode("neu ü\nzwei"),
+                "{bom:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_file_write_new_and_plain_files_stay_utf8_without_mark() {
+        let dir = setup();
+        let tools = EditTools::new();
+        let existing = dir.path().join("plain.txt");
+        fs::write(&existing, "old").unwrap();
+        let fresh = dir.path().join("fresh.txt");
+
+        for path in [&existing, &fresh] {
+            let result = tools.file_write(FileWriteParams {
+                path: path.to_string_lossy().to_string(),
+                content: "ü".to_string(),
+            });
+            assert!(!extract_text(&result).contains("kept"));
+            assert_eq!(fs::read(path).unwrap(), "ü".as_bytes());
+        }
     }
 }

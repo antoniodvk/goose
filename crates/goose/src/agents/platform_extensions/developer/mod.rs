@@ -1,4 +1,5 @@
 pub mod edit;
+mod encoding;
 pub mod image;
 pub mod read;
 pub mod shell;
@@ -127,7 +128,7 @@ impl DeveloperClient {
             )),
             Tool::new(
                 "write".to_string(),
-                "Create a new file or overwrite an existing file. Creates parent directories if needed. To change only part of a file, use edit instead. Before replacing a file that already exists, read it, so you know what the new content drops.".to_string(),
+                "Create a new file or overwrite an existing file; an existing file keeps its encoding (UTF-8 with or without BOM, UTF-16 with BOM). Creates parent directories if needed. To change only part of a file, use edit instead. Before replacing a file that already exists, read it, so you know what the new content drops.".to_string(),
                 Self::schema::<FileWriteParams>(),
             )
             .annotate(ToolAnnotations::from_raw(
@@ -139,7 +140,7 @@ impl DeveloperClient {
             )),
             Tool::new(
                 "edit".to_string(),
-                "Edit a file by finding and replacing text. The before text must match exactly and uniquely, unless replace_all is true, which replaces every occurrence. Use empty after text to delete. Read the file before editing it, so the before text matches the current content, indentation included.".to_string(),
+                "Edit a file by finding and replacing text. The before text must match exactly and uniquely, unless replace_all is true, which replaces every occurrence. Use empty after text to delete. The file keeps its encoding and line endings (UTF-8 with or without BOM, UTF-16 with BOM). Read the file before editing it, so the before text matches the current content, indentation included.".to_string(),
                 Self::schema::<FileEditParams>(),
             )
             .annotate(ToolAnnotations::from_raw(
