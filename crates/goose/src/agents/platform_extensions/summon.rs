@@ -608,8 +608,13 @@ impl SummonClient {
              2. Source-based: Provide `source` name to run a subrecipe, recipe, or agent\n\
              3. Combined: Pair a source with a task (e.g., source: \"deploy\", instructions: \"deploy to staging\")\n\
              4. Resume: Provide `resume` with the subagent ID of a failed or cancelled delegate to continue it instead of starting over. If the user says to continue after a stop, resume the ones from the latest stop unless they name others. Completed delegates cannot be resumed.\n\n\
+             When to delegate:\n\
+             - A delegate costs more than it seems: you only see its final report, and its mistakes sound as sure as its findings.\n\
+             - Delegate independent work that can run on its own, a side task that should not fill your context, or reading across many files when you only need the conclusion.\n\
+             - Do quick lookups and checks yourself, and once you have delegated something, don't also do it yourself.\n\
+             - The user does not see a delegate's report: pass on what matters.\n\n\
              Effective Delegation:\n\
-             - Delegates know only instructions + source content\n\
+             - Delegates know only instructions + source content, so brief them like a colleague: the goal, what you have already ruled out, which files to read, and a narrow scope.\n\
              - Delegates cannot coordinate. Same-file work = conflicts.\n\
              - You get a delegate's result back once it finishes.\n\n\
              Research (read-only): delegates explore and report back.\n\

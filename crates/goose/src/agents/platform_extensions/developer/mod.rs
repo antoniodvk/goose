@@ -115,7 +115,7 @@ impl DeveloperClient {
         vec![
             Tool::new(
                 "read".to_string(),
-                "Read a file from disk. Text comes back with line numbers (`     12<tab>text`); the numbers are not part of the file, so leave them out when you pass text to edit. Reads the first 2000 lines by default and cuts lines at 2000 characters; use line and limit for more, output is limited to 100,000 bytes. Understands UTF-8, UTF-8 with BOM and UTF-16 with BOM. PDF files give their text per page: use pages (for example \"1-5\", at most 20 pages per request; required for PDFs with more than 10 pages). Jupyter notebooks (.ipynb) give all cells with their text outputs. For images use read_image.".to_string(),
+                "Read a file from disk. Text comes back with line numbers (`     12<tab>text`); the numbers are not part of the file, so leave them out when you pass text to edit. Reads the first 2000 lines by default and cuts lines at 2000 characters; use line and limit for more, output is limited to 100,000 bytes. Understands UTF-8, UTF-8 with BOM and UTF-16 with BOM. PDF files give their text per page: use pages (for example \"1-5\", at most 20 pages per request; required for PDFs with more than 10 pages). Jupyter notebooks (.ipynb) give all cells with their text outputs. For images use read_image. When you already know which part of a file matters, read just that part with line and limit. Don't read a file again only to confirm your own edit or write: both report an error when they fail.".to_string(),
                 Self::schema::<FileReadParams>(),
             )
             .annotate(ToolAnnotations::from_raw(
@@ -127,7 +127,7 @@ impl DeveloperClient {
             )),
             Tool::new(
                 "write".to_string(),
-                "Create a new file or overwrite an existing file. Creates parent directories if needed.".to_string(),
+                "Create a new file or overwrite an existing file. Creates parent directories if needed. To change only part of a file, use edit instead. Before replacing a file that already exists, read it, so you know what the new content drops.".to_string(),
                 Self::schema::<FileWriteParams>(),
             )
             .annotate(ToolAnnotations::from_raw(
@@ -139,7 +139,7 @@ impl DeveloperClient {
             )),
             Tool::new(
                 "edit".to_string(),
-                "Edit a file by finding and replacing text. The before text must match exactly and uniquely, unless replace_all is true, which replaces every occurrence. Use empty after text to delete.".to_string(),
+                "Edit a file by finding and replacing text. The before text must match exactly and uniquely, unless replace_all is true, which replaces every occurrence. Use empty after text to delete. Read the file before editing it, so the before text matches the current content, indentation included.".to_string(),
                 Self::schema::<FileEditParams>(),
             )
             .annotate(ToolAnnotations::from_raw(
@@ -165,7 +165,19 @@ impl DeveloperClient {
                      fields. The output of each stream is limited to up to 2000 lines, and \
                      longer outputs will be saved to a temporary file. A command is killed \
                      after 300 seconds unless timeout_secs is set; use timeout_secs for long \
-                     builds or tests, and 0 for no limit.",
+                     builds or tests, and 0 for no limit.\n\n\
+                     Where a dedicated tool fits, use it instead of a shell command: read rather \
+                     than cat, type, Get-Content, head or tail; edit or write rather than sed, \
+                     echo or redirecting into a file; tree rather than ls, dir or find for an \
+                     overview. Give paths in full instead of relying on cd. You see the command \
+                     output, the user may not: tell them what matters in your reply.\n\n\
+                     Git: options that open an editor or wait for input (such as -i) hang here, so \
+                     don't use them. Use the gh CLI for GitHub. Commit or push only when the user \
+                     asks for it, and on the default branch create a new branch first, unless \
+                     the user's own rules say otherwise. In GitHub issues, pull requests and \
+                     comments, @name notifies that account: write it only for a real person you \
+                     mean to reach, and put placeholders or package names such as @types/node \
+                     in backticks.",
                 );
                 Tool::new("shell".to_string(), description, Self::schema::<ShellParams>())
             }
