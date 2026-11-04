@@ -3,6 +3,7 @@ mod encoding;
 pub mod image;
 pub mod notebook;
 pub mod read;
+pub mod search;
 pub mod shell;
 mod shell_output_streaming;
 mod shell_process;
@@ -22,6 +23,7 @@ use rmcp::model::{
     ListToolsResult, ServerCapabilities, TextContent, Tool, ToolAnnotations,
 };
 use schemars::{schema_for, JsonSchema};
+use search::{GlobParams, GrepParams, SearchTools};
 use serde_json::Value;
 use shell::{shell_display_name, ShellOutput, ShellParams, ShellTool};
 use std::sync::Arc;
@@ -43,6 +45,7 @@ pub struct DeveloperClient {
     notebook_tools: Arc<NotebookTools>,
     read_tool: Arc<ReadTool>,
     tree_tool: Arc<TreeTool>,
+    search_tools: Arc<SearchTools>,
     image_tool: Arc<ImageTool>,
 }
 
@@ -57,8 +60,8 @@ fn developer_instructions() -> &'static str {
             cost the user money.
 
             For editing software, prefer the flow of using tree to understand the codebase structure
-            and file sizes. When you need to search, prefer findstr or Select-String (via shell).
-            Then use read (with line and limit for large files) to gather the context you need,
+            and file sizes. When you need to search, use grep for file contents and glob for file
+            names. Then use read (with line and limit for large files) to gather the context you need,
             always reading before editing. Use write and edit to efficiently make changes. Test
             and verify as appropriate.
         "}
@@ -72,8 +75,8 @@ fn developer_instructions() -> &'static str {
             cost the user money.
 
             For editing software, prefer the flow of using tree to understand the codebase structure
-            and file sizes. When you need to search, prefer rg which correctly respects gitignored
-            content. Then use read (with line and limit for large files) to gather the context you
+            and file sizes. When you need to search, use grep for file contents and glob for file
+            names. Then use read (with line and limit for large files) to gather the context you
             need, always reading before editing.
             Use write and edit to efficiently make changes. Test and verify as appropriate.
 
@@ -95,6 +98,7 @@ impl DeveloperClient {
             notebook_tools: Arc::new(NotebookTools::new()),
             read_tool: Arc::new(ReadTool::new()),
             tree_tool: Arc::new(TreeTool::new()),
+            search_tools: Arc::new(SearchTools::new()),
             image_tool: Arc::new(ImageTool::new()),
         })
     }
@@ -186,7 +190,9 @@ impl DeveloperClient {
                      Where a dedicated tool fits, use it instead of a shell command: read rather \
                      than cat, type, Get-Content, head or tail; edit or write rather than sed, \
                      echo or redirecting into a file; tree rather than ls, dir or find for an \
-                     overview. Give paths in full instead of relying on cd. You see the command \
+                     overview; grep rather than grep, rg, findstr or Select-String to search \
+                     file contents; glob rather than find, dir /s or Get-ChildItem -Recurse to \
+                     find files by name. Give paths in full instead of relying on cd. You see the command \
                      output, the user may not: tell them what matters in your reply.\n\n\
                      Git: options that open an editor or wait for input (such as -i) hang here, so \
                      don't use them. Use the gh CLI for GitHub. Commit or push only when the user \
@@ -213,6 +219,30 @@ impl DeveloperClient {
             )
             .annotate(ToolAnnotations::from_raw(
                 Some("Tree".to_string()),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+            )),
+            Tool::new(
+                "grep".to_string(),
+                "Search file contents with a regular expression (Rust regex syntax, like ripgrep; escape literal braces, e.g. `interface\\{\\}`). Use this for every content search instead of grep, rg, findstr or Select-String in the shell. path is a file or directory (default: the working directory); narrow with glob (e.g. \"*.mjs\", \"**/*.{ts,tsx}\") or type (e.g. js, rust, py, md). output_mode: files_with_matches (default, paths only, most recently modified first), content (matching lines as path:line:text; -A, -B, -C or context add lines around them, -n shows line numbers and is on by default), count (matching lines per file). -i ignores case; multiline lets a pattern span lines. Results are limited to head_limit lines or entries (default 250, 0 for all); continue with offset. Respects .gitignore and .ignore, searches hidden files such as .claude (never .git), skips binary files and does not follow links.".to_string(),
+                Self::schema::<GrepParams>(),
+            )
+            .annotate(ToolAnnotations::from_raw(
+                Some("Grep".to_string()),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+            )),
+            Tool::new(
+                "glob".to_string(),
+                "Find files by name with a glob pattern such as \"**/*.ts\" or \"src/**/*.mjs\" (a pattern without a slash matches the file name in any folder). Returns matching paths, most recently modified first, at most 100; narrow the pattern or path for more. Same rules as grep: respects .gitignore, includes hidden files, never .git, does not follow links. Use this instead of find, dir /s or Get-ChildItem -Recurse; for an overview with line counts use tree.".to_string(),
+                Self::schema::<GlobParams>(),
+            )
+            .annotate(ToolAnnotations::from_raw(
+                Some("Glob".to_string()),
                 Some(true),
                 Some(false),
                 Some(true),
@@ -304,6 +334,18 @@ impl McpClientTrait for DeveloperClient {
                     "Error: {error}"
                 ))])),
             },
+            "grep" => match Self::parse_args::<GrepParams>(arguments) {
+                Ok(params) => Ok(self.search_tools.grep_with_cwd(params, working_dir)),
+                Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
+                    "Error: {error}"
+                ))])),
+            },
+            "glob" => match Self::parse_args::<GlobParams>(arguments) {
+                Ok(params) => Ok(self.search_tools.glob_with_cwd(params, working_dir)),
+                Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
+                    "Error: {error}"
+                ))])),
+            },
             "read_image" => match Self::parse_args::<ImageReadParams>(arguments) {
                 Ok(params) => Ok(self
                     .image_tool
@@ -347,6 +389,8 @@ mod tests {
                 "notebook_edit",
                 "shell",
                 "tree",
+                "grep",
+                "glob",
                 "read_image"
             ]
         );
