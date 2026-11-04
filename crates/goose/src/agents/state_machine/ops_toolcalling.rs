@@ -17,6 +17,7 @@ use crate::agents::state_machine::{
 use crate::agents::tool_execution::{
     declined_response, tool_stream, ToolCallResult, ToolStreamItem, CHAT_MODE_TOOL_SKIPPED_RESPONSE,
 };
+use crate::agents::tool_search;
 use crate::agents::AgentEvent;
 use crate::config::GooseMode;
 use crate::conversation::message::{
@@ -349,11 +350,38 @@ fn with_post_tool_hooks(
     }
 }
 
+/// The lease the turn's inference prepared, or the session's current one.
+pub(super) async fn session_lease(
+    extension_manager: &Arc<ExtensionManager>,
+    shared: &StdMutex<Option<Arc<ExtensionLease>>>,
+    session: &Session,
+) -> Result<Arc<ExtensionLease>> {
+    let lease = shared.lock().expect("extension lease unavailable").clone();
+    if let Some(lease) = lease {
+        if lease.scope_id() == session.id {
+            return Ok(lease);
+        }
+    }
+    resolve_session_lease(extension_manager, shared, session).await
+}
+
+async fn resolve_session_lease(
+    extension_manager: &Arc<ExtensionManager>,
+    shared: &StdMutex<Option<Arc<ExtensionLease>>>,
+    session: &Session,
+) -> Result<Arc<ExtensionLease>> {
+    let lease = Arc::new(extension_manager.current_lease(&session.id).await?);
+    *shared.lock().expect("extension lease unavailable") = Some(Arc::clone(&lease));
+    Ok(lease)
+}
+
 pub struct ToolExecutionOperation {
     extension_manager: Arc<ExtensionManager>,
     hook_manager: HookManager,
     lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
     batch: Arc<StdMutex<ToolBatch>>,
+    /// Defer extension tools behind `tool_search` (C161).
+    tool_search: bool,
 }
 
 impl ToolExecutionOperation {
@@ -361,12 +389,14 @@ impl ToolExecutionOperation {
         extension_manager: Arc<ExtensionManager>,
         hook_manager: HookManager,
         lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
+        tool_search: bool,
     ) -> Self {
         Self {
             extension_manager,
             hook_manager,
             lease,
             batch: Arc::default(),
+            tool_search,
         }
     }
 
@@ -375,23 +405,11 @@ impl ToolExecutionOperation {
     }
 
     async fn lease(&self, session: &Session) -> Result<Arc<ExtensionLease>> {
-        let lease = self
-            .lease
-            .lock()
-            .expect("extension lease unavailable")
-            .clone();
-        if let Some(lease) = lease {
-            if lease.scope_id() == session.id {
-                return Ok(lease);
-            }
-        }
-        self.resolve_lease(session).await
+        session_lease(&self.extension_manager, &self.lease, session).await
     }
 
     async fn resolve_lease(&self, session: &Session) -> Result<Arc<ExtensionLease>> {
-        let lease = Arc::new(self.extension_manager.current_lease(&session.id).await?);
-        *self.lease.lock().expect("extension lease unavailable") = Some(Arc::clone(&lease));
-        Ok(lease)
+        resolve_session_lease(&self.extension_manager, &self.lease, session).await
     }
 
     async fn dispatch_tool_call(
@@ -839,11 +857,21 @@ impl Operation<Session, GooseEffect> for ToolExecutionOperation {
     }
 
     async fn inference_tools(&self, session: &Session) -> Result<Vec<Tool>> {
-        Ok(self
-            .lease(session)
-            .await?
-            .tools_excluding(crate::skills::EXTENSION_NAME)
-            .await)
+        let lease = self.lease(session).await?;
+        if !tool_search::active_for(self.tool_search, &lease) {
+            return Ok(lease.tools_excluding(crate::skills::EXTENSION_NAME).await);
+        }
+        let partition = tool_search::ToolPartition::new(
+            lease
+                .tools_excluding_with_origin(crate::skills::EXTENSION_NAME)
+                .await,
+        );
+        let messages = session
+            .conversation
+            .as_ref()
+            .map(|conversation| conversation.messages().as_slice())
+            .unwrap_or_default();
+        Ok(partition.callable(&tool_search::loaded_names(messages)))
     }
 
     async fn moim_parts(
@@ -887,12 +915,18 @@ impl Operation<Session, GooseEffect> for ToolExecutionOperation {
             return Ok(prompt_parts);
         }
 
+        let where_tools_are = if tool_search::active_for(self.tool_search, &lease) {
+            "in your tool specification or listed under Deferred tools"
+        } else {
+            "in your tool specification"
+        };
         let mut lines = vec![
             "# Extensions".to_string(),
-            "Extensions provide additional tools and context from different data sources and applications.\n\
-             You can dynamically enable or disable extensions as needed to help complete tasks.\n\n\
-             Because you dynamically load extensions, your conversation history may refer to interactions with extensions that are not currently active. The currently active extensions are below. Each of these extensions provides tools that are in your tool specification."
-                .to_string(),
+            format!(
+                "Extensions provide additional tools and context from different data sources and applications.\n\
+                 You can dynamically enable or disable extensions as needed to help complete tasks.\n\n\
+                 Because you dynamically load extensions, your conversation history may refer to interactions with extensions that are not currently active. The currently active extensions are below. Each of these extensions provides tools that are {where_tools_are}."
+            ),
         ];
         for extension in extensions {
             lines.push(format!("## {}", extension.name));

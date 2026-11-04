@@ -153,6 +153,7 @@ pub(super) struct TestPipeline {
     subagent_host: Arc<crate::agents::Agent>,
     extra_operations: Vec<Arc<dyn Operation<Session, GooseEffect>>>,
     recorded_model_configs: Option<Arc<StdMutex<Vec<ModelConfig>>>>,
+    tool_search: bool,
     _temp_dir: Arc<tempfile::TempDir>,
 }
 
@@ -172,6 +173,7 @@ impl TestPipeline {
                 COMPACTION_THRESHOLD,
             ),
             tool_pair_summarization: true,
+            tool_search: self.tool_search,
             session_manager: self.session_manager.clone(),
             extension_manager: self.extension_manager.clone(),
             extension_lease: Arc::clone(&self.extension_lease),
@@ -186,6 +188,12 @@ impl TestPipeline {
             extra_operations: self.extra_operations.clone(),
             cancel,
         })
+    }
+
+    /// Defer extension tools behind `tool_search`, as `GOOSE_TOOL_SEARCH=true` does (C161).
+    pub(super) fn with_tool_search(mut self) -> Self {
+        self.tool_search = true;
+        self
     }
 
     pub(super) async fn with_goose_mode(self, mode: GooseMode) -> Self {
@@ -873,6 +881,7 @@ async fn build_test_pipeline(
         subagent_host,
         extra_operations: Vec::new(),
         recorded_model_configs: None,
+        tool_search: false,
         _temp_dir: temp_dir,
     };
     let extension_manager = pipeline.extension_manager.clone();
@@ -1166,9 +1175,10 @@ impl TestRun {
     }
 }
 
-const TOOL_OPERATIONS: [&str; 5] = [
+const TOOL_OPERATIONS: [&str; 6] = [
     "tool_approval",
     "skills",
+    "tool_search",
     "recipe",
     "tool_execution",
     "remaining_tool_calls",

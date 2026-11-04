@@ -743,6 +743,7 @@ impl Agent {
             compaction_threshold,
             tool_call_cutoff,
             tool_pair_summarization: crate::context_mgmt::tool_pair_summarization_enabled(),
+            tool_search: crate::agents::tool_search::enabled(),
             session_manager: self.config.session_manager.clone(),
             extension_manager: Arc::clone(&self.extension_manager),
             extension_lease,

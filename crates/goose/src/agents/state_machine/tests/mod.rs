@@ -21,6 +21,7 @@ mod recipe_scheduling_lifecycle;
 mod reconstruction_isolation_lifecycle;
 mod steering_lifecycle;
 mod tool_lifecycle;
+mod tool_search_lifecycle;
 
 async fn capture_state_machine_trace_fields(
     capture_setting: Option<&'static str>,

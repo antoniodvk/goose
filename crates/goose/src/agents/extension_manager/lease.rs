@@ -297,6 +297,19 @@ impl ExtensionLease {
             .collect()
     }
 
+    /// Like `tools_excluding`, each tool paired with whether its extension is part of goose
+    /// itself (a platform extension); tool search defers only the others.
+    pub async fn tools_excluding_with_origin(&self, extension: &str) -> Vec<(Tool, bool)> {
+        let key = name_to_key(extension);
+        self.tool_catalog()
+            .await
+            .entries
+            .iter()
+            .filter(|entry| entry.extension.key != key)
+            .map(|entry| (entry.tool.clone(), entry.extension.is_platform()))
+            .collect()
+    }
+
     pub fn is_enabled(&self, extension: &str) -> bool {
         let key = name_to_key(extension);
         self.slots.iter().any(|slot| slot.key == key)

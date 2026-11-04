@@ -1,5 +1,6 @@
 use crate::agents::platform_extensions::MANAGE_EXTENSIONS_TOOL_NAME_COMPLETE;
 use crate::agents::provider_manager::ProviderManager;
+use crate::agents::tool_search::TOOL_SEARCH_TOOL_NAME;
 use crate::config::permission::PermissionLevel;
 use crate::config::{GooseMode, PermissionManager};
 use crate::conversation::message::{Message, ToolRequest};
@@ -169,9 +170,12 @@ impl ToolInspector for PermissionInspector {
                                     InspectionAction::RequireApproval(None)
                                 }
                             }
-                        // 2. Check for a read-only annotation in SmartApprove mode
-                        } else if goose_mode == GooseMode::SmartApprove
-                            && self.is_readonly_annotated_tool(tool_name)
+                        // 2. Tool search in both modes: it only adds tool definitions to the next
+                        // request, and each tool it loads is inspected when it is called (C161).
+                        // Otherwise a read-only annotation in SmartApprove mode.
+                        } else if tool_name == TOOL_SEARCH_TOOL_NAME
+                            || (goose_mode == GooseMode::SmartApprove
+                                && self.is_readonly_annotated_tool(tool_name))
                         {
                             InspectionAction::Allow
                         // 3. Special case for extension management
@@ -199,6 +203,10 @@ impl ToolInspector for PermissionInspector {
                     InspectionAction::Allow => {
                         if goose_mode == GooseMode::Auto {
                             "Auto mode - all tools approved".to_string()
+                        } else if tool_name == TOOL_SEARCH_TOOL_NAME
+                            && permission_manager.get_user_permission(tool_name).is_none()
+                        {
+                            "Tool search only loads tool definitions".to_string()
                         } else if self.is_readonly_annotated_tool(tool_name) {
                             "Tool annotated as read-only".to_string()
                         } else {

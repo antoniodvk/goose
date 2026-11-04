@@ -13,7 +13,7 @@ use crate::agents::state_machine::{
     RecipeOperation, RemainingToolCallsOperation, RetryOperation, SkillOperation,
     SlashCommandOperation, StateMachine, StatusOperation, SteerOperation, SteerQueue, Step,
     StopHookOperation, SubagentOperation, ToolApprovalOperation, ToolExecutionOperation,
-    ToolPairCompactionOperation,
+    ToolPairCompactionOperation, ToolSearchOperation,
 };
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::config::Config;
@@ -29,6 +29,8 @@ pub(crate) struct StateMachineConfig<'a> {
     pub(crate) compaction_threshold: f64,
     pub(crate) tool_call_cutoff: usize,
     pub(crate) tool_pair_summarization: bool,
+    /// Defer extension tools behind `tool_search` (C161, `tool_search::enabled()`).
+    pub(crate) tool_search: bool,
     pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) extension_manager: Arc<ExtensionManager>,
     pub(crate) extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
@@ -54,6 +56,7 @@ pub(crate) fn build_state_machine(
         compaction_threshold,
         tool_call_cutoff,
         tool_pair_summarization,
+        tool_search,
         session_manager,
         extension_manager,
         extension_lease,
@@ -76,6 +79,12 @@ pub(crate) fn build_state_machine(
             hook_manager.clone(),
             Arc::clone(&extension_lease),
         )),
+        Arc::new(ToolSearchOperation::new(
+            Arc::clone(&extension_manager),
+            hook_manager.clone(),
+            Arc::clone(&extension_lease),
+            tool_search,
+        )),
         Arc::new(RecipeOperation::new(
             provider.clone(),
             Arc::clone(&extension_manager),
@@ -85,6 +94,7 @@ pub(crate) fn build_state_machine(
             Arc::clone(&extension_manager),
             hook_manager.clone(),
             Arc::clone(&extension_lease),
+            tool_search,
         )),
         Arc::new(RemainingToolCallsOperation::new(hook_manager.clone())),
         // Before the foreground subagents, which hold the turn until one of them finishes.

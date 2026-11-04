@@ -27,6 +27,7 @@ mod ops_stop_hook;
 mod ops_subagent;
 mod ops_tool_approval;
 mod ops_tool_pair_compaction;
+mod ops_tool_search;
 mod ops_toolcalling;
 mod session;
 pub(crate) use session::run as run_goose;
@@ -78,4 +79,5 @@ pub(super) use ops_subagent::{
 };
 pub(super) use ops_tool_approval::ToolApprovalOperation;
 pub(super) use ops_tool_pair_compaction::ToolPairCompactionOperation;
+pub(super) use ops_tool_search::ToolSearchOperation;
 pub(super) use ops_toolcalling::ToolExecutionOperation;

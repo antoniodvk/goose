@@ -43,6 +43,12 @@ fn enrich_unclaimed_tool_errors(messages: &[Message], tools: &[rmcp::model::Tool
         .collect::<Vec<_>>();
     available_tools.sort_unstable();
     available_tools.dedup();
+    let deferred_hint =
+        if available_tools.contains(&crate::agents::tool_search::TOOL_SEARCH_TOOL_NAME) {
+            " A tool listed under Deferred tools has to be loaded with tool_search first."
+        } else {
+            ""
+        };
     let available_tools = available_tools.join(", ");
     let mut messages = messages.to_vec();
     for message in &mut messages {
@@ -65,7 +71,7 @@ fn enrich_unclaimed_tool_errors(messages: &[Message], tools: &[rmcp::model::Tool
                 continue;
             };
             result.content.push(rmcp::model::ContentBlock::text(format!(
-                "Available tools: [{available_tools}]."
+                "Available tools: [{available_tools}].{deferred_hint}"
             )));
         }
     }
