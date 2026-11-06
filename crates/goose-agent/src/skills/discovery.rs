@@ -7,13 +7,30 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+/// How the entries of a root are named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillNaming {
+    /// The `name` in the frontmatter.
+    Frontmatter,
+    /// The skill folder's name, which is what Claude Code goes by. Such a skill needs
+    /// no `name`, and it stays listed when its frontmatter cannot be read.
+    Folder,
+    /// `<plugin>:<folder>`, Claude Code's name for a plugin skill.
+    PluginFolder(String),
+}
+
 /// A host-selected search root; earlier roots take precedence.
 #[derive(Debug, Clone)]
 pub struct SkillRoot {
-    /// Directory searched recursively for `SKILL.md`. Returned entry paths identify
+    /// Directory searched for `SKILL.md`. Returned entry paths identify
     /// the containing skill directory, not the Markdown file.
     /// Relative roots are resolved against the process working directory.
     pub path: PathBuf,
+    /// Descend into subdirectories looking for `SKILL.md`. With `false` only a
+    /// `SKILL.md` directly inside a child directory of the root is found, which is
+    /// how Claude Code treats its `skills` folders.
+    pub recursive: bool,
+    pub naming: SkillNaming,
     /// Scope metadata copied to each entry, not inferred from its location.
     pub global: bool,
     /// Writability metadata copied to each entry. Discovery does not check
@@ -26,7 +43,7 @@ pub struct SkillRoot {
     pub preserve_path: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct Frontmatter {
     #[serde(default)]
     name: Option<String>,
@@ -56,17 +73,19 @@ fn parse_skill_content(
     path: &Path,
     global: bool,
     writable: bool,
+    folder_name: Option<String>,
 ) -> Option<SourceEntry> {
-    let (metadata, body): (Frontmatter, String) = match parse_frontmatter(content) {
-        Ok(Some(parsed)) => parsed,
-        Ok(None) => return None,
-        Err(e) => {
-            warn!("Failed to parse skill frontmatter: {}", e);
-            return None;
-        }
+    let parsed = parse_frontmatter(content).unwrap_or_else(|e| {
+        warn!("Failed to parse skill frontmatter: {}", e);
+        None
+    });
+    let (metadata, body): (Frontmatter, String) = match parsed {
+        Some(parsed) => parsed,
+        None if folder_name.is_some() => (Frontmatter::default(), content.to_string()),
+        None => return None,
     };
 
-    let name = match metadata.name.filter(|n| !n.is_empty()) {
+    let name = match folder_name.or(metadata.name.filter(|n| !n.is_empty())) {
         Some(n) => n,
         None => {
             warn!(
@@ -137,33 +156,61 @@ fn walk_files_recursively<F, G>(
     }
 }
 
-fn scan_skills_from_dir(
-    dir: &Path,
-    global: bool,
-    writable: bool,
-    preserve_path: bool,
-    seen: &mut HashSet<String>,
-) -> Vec<SourceEntry> {
-    let mut skill_files = Vec::new();
-    let mut visited_dirs = HashSet::new();
+/// Claude Code keeps this folder name for the sync-owned root and never treats it as
+/// a skill, comparing it in its normalized form, which ignores case.
+const SYNCED_DIR_NAME: &str = "synced";
 
-    walk_files_recursively(
-        dir,
-        &mut visited_dirs,
-        &mut |path| !should_skip_dir(path),
-        &mut |path| {
-            if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
-                skill_files.push(path.to_path_buf());
+fn skill_files_in_root(dir: &Path, recursive: bool) -> Vec<PathBuf> {
+    let mut skill_files = Vec::new();
+    if recursive {
+        let mut visited_dirs = HashSet::new();
+        walk_files_recursively(
+            dir,
+            &mut visited_dirs,
+            &mut |path| !should_skip_dir(path),
+            &mut |path| {
+                if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+                    skill_files.push(path.to_path_buf());
+                }
+            },
+        );
+    } else if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(SYNCED_DIR_NAME))
+            {
+                continue;
             }
-        },
-    );
+            let skill_file = entry.path().join("SKILL.md");
+            if skill_file.is_file() {
+                skill_files.push(skill_file);
+            }
+        }
+    }
+    skill_files
+}
+
+fn scan_skills_from_dir(
+    root: &SkillRoot,
+    seen_names: &mut HashSet<String>,
+    seen_files: &mut HashSet<PathBuf>,
+) -> Vec<SourceEntry> {
+    let skill_files = skill_files_in_root(&root.path, root.recursive);
 
     let mut sources = Vec::new();
     for skill_file in skill_files {
         let Some(skill_dir) = skill_file.parent() else {
             continue;
         };
-        let registered_skill_dir = if preserve_path {
+        let Ok(file_identity) = skill_file.canonicalize() else {
+            continue;
+        };
+        if seen_files.contains(&file_identity) {
+            continue;
+        }
+        let registered_dir = if root.preserve_path {
             skill_dir.to_path_buf()
         } else {
             let Ok(canonical_dir) = skill_dir.canonicalize() else {
@@ -179,10 +226,14 @@ fn scan_skills_from_dir(
             }
         };
 
-        if let Some(mut source) =
-            parse_skill_content(&content, &registered_skill_dir, global, writable)
-        {
-            if !seen.contains(&source.name) {
+        if let Some(mut source) = parse_skill_content(
+            &content,
+            &registered_dir,
+            root.global,
+            root.writable,
+            folder_name(&root.naming, skill_dir),
+        ) {
+            if !seen_names.contains(&source.name) {
                 let mut files = Vec::new();
                 let mut visited_support_dirs = HashSet::new();
                 walk_files_recursively(
@@ -193,10 +244,7 @@ fn scan_skills_from_dir(
                         if path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
                             if let Ok(relative) = path.strip_prefix(skill_dir) {
                                 files.push(
-                                    registered_skill_dir
-                                        .join(relative)
-                                        .to_string_lossy()
-                                        .into_owned(),
+                                    registered_dir.join(relative).to_string_lossy().into_owned(),
                                 );
                             }
                         }
@@ -204,7 +252,8 @@ fn scan_skills_from_dir(
                 );
                 source.supporting_files = files;
 
-                seen.insert(source.name.clone());
+                seen_names.insert(source.name.clone());
+                seen_files.insert(file_identity);
                 sources.push(source);
             }
         }
@@ -212,12 +261,25 @@ fn scan_skills_from_dir(
     sources
 }
 
-/// Recursively discovers skills from explicit roots, without consulting host configuration.
+/// The name a root's naming takes from the skill folder; `None` leaves it to the frontmatter.
+fn folder_name(naming: &SkillNaming, skill_dir: &Path) -> Option<String> {
+    let folder = skill_dir.file_name()?.to_str()?;
+    match naming {
+        SkillNaming::Frontmatter => None,
+        SkillNaming::Folder => Some(folder.to_string()),
+        SkillNaming::PluginFolder(plugin) => Some(format!("{plugin}:{folder}")),
+    }
+}
+
+/// Discovers skills from explicit roots, without consulting host configuration. Each
+/// root says whether it is searched recursively or only one level deep.
 ///
-/// Roots are visited in input order. The first successfully parsed entry with a
-/// given name wins; names are compared exactly and case-sensitively. Traversal
-/// within each root is unsorted, so result order, duplicate-name winners within a
-/// root, and supporting-file order are unspecified.
+/// Roots are visited in input order. A skill file an earlier root already supplied
+/// (the same file after resolving links) is skipped, as Claude Code does; after that
+/// the first successfully parsed entry with a given name wins, names compared exactly
+/// and case-sensitively. Each root says how its entries are named.
+/// Traversal within each root is unsorted, so result order, duplicate-name winners
+/// within a root, and supporting-file order are unspecified.
 ///
 /// Discovery is best-effort: missing or unreadable directories and invalid or
 /// unreadable skills are skipped. Some failures emit tracing warnings; no errors
@@ -229,16 +291,11 @@ fn scan_skills_from_dir(
 /// The caller must enforce access policy when opening returned paths.
 pub fn discover_skills(roots: impl IntoIterator<Item = SkillRoot>) -> Vec<SourceEntry> {
     let mut sources: Vec<SourceEntry> = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen_names = HashSet::new();
+    let mut seen_files = HashSet::new();
 
-    for dir in roots {
-        for source in scan_skills_from_dir(
-            &dir.path,
-            dir.global,
-            dir.writable,
-            dir.preserve_path,
-            &mut seen,
-        ) {
+    for root in roots {
+        for source in scan_skills_from_dir(&root, &mut seen_names, &mut seen_files) {
             sources.push(source);
         }
     }

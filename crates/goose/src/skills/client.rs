@@ -138,7 +138,7 @@ impl McpClientTrait for SkillsClient {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let skills = self.discover_skills(&working_dir);
 
-        if let Some(skill) = skills.iter().find(|s| s.name == skill_name) {
+        if let Some(skill) = crate::skills::find_skill(&skills, skill_name) {
             return match loaded_skill_context_with_args(skill, args) {
                 Ok(rendered) => Ok(CallToolResult::success(vec![ContentBlock::text(rendered)])),
                 Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
@@ -150,10 +150,9 @@ impl McpClientTrait for SkillsClient {
 
         if let Some((parent_skill_name, raw_relative_path)) = skill_name.split_once('/') {
             let relative_path = raw_relative_path.replace('\\', "/");
-            if let Some(skill) = skills.iter().find(|s| {
-                s.name == parent_skill_name
-                    && matches!(s.source_type, SourceType::Skill | SourceType::BuiltinSkill)
-            }) {
+            if let Some(skill) = crate::skills::find_skill(&skills, parent_skill_name)
+                .filter(|s| matches!(s.source_type, SourceType::Skill | SourceType::BuiltinSkill))
+            {
                 let listed_skill_dir = PathBuf::from(&skill.path);
                 let load_skill_dir = match listed_skill_dir.canonicalize() {
                     Ok(path) => path,

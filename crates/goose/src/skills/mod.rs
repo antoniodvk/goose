@@ -20,7 +20,7 @@ use crate::plugins::{
 use crate::sources::parse_frontmatter;
 use agent_client_protocol::Error;
 use anyhow::Result;
-use goose_agent::skills::SkillRoot;
+use goose_agent::skills::{SkillNaming, SkillRoot};
 use goose_sdk_types::custom_requests::{SourceEntry, SourceType};
 use serde::Deserialize;
 use serde_json::Value;
@@ -312,9 +312,166 @@ struct SkillDirectory {
     is_global: bool,
     writable: bool,
     preserve_path: bool,
+    /// Search subdirectories for `SKILL.md`; `false` reads only the `SKILL.md` of
+    /// each child directory, like Claude Code reads its skill folders.
+    recursive: bool,
+    naming: SkillNaming,
+}
+
+/// `GOOSE_SKILL_LISTING` marks the Goose App's Claude Code profile: the server fills it
+/// from Claude Code's settings and sets it only for Goose Code (`server/code-chats.mjs`
+/// › `claudeSetup`, `buildCodeEnv`). Goose Code then reads skills where Claude Code does.
+fn claude_code_profile() -> bool {
+    std::env::var_os("GOOSE_SKILL_LISTING").is_some()
 }
 
 fn all_skill_dirs_with_config(working_dir: Option<&Path>, config: &Config) -> Vec<SkillDirectory> {
+    skill_dirs_with_config(
+        claude_code_profile(),
+        dirs::home_dir().as_deref(),
+        working_dir,
+        config,
+    )
+}
+
+fn skill_dirs_with_config(
+    claude_profile: bool,
+    home: Option<&Path>,
+    working_dir: Option<&Path>,
+    config: &Config,
+) -> Vec<SkillDirectory> {
+    if claude_profile {
+        return claude_skill_dirs(home, working_dir, config);
+    }
+    goose_skill_dirs(home, working_dir, config)
+}
+
+/// Claude Code's own skill locations (Claude Code 2.1.319: `pWr` in its program; docs
+/// code.claude.com/docs/en/skills), in Claude's order: the personal `~/.claude/skills`,
+/// the project's `.claude/skills` folders, then the plugin skills and the commands.
+/// Every folder holds skills one level down, named after their folder; subfolders are
+/// not searched, `~/.agents` is no Claude location, and the reserved child name `synced`
+/// never becomes a skill. The account's synced skills arrive as the plugin
+/// `anthropic-skills`, the name Claude gives them, because only the App server knows
+/// who is signed in (`server/code-chats.mjs` › `syncPlugins`).
+fn claude_skill_dirs(
+    home: Option<&Path>,
+    working_dir: Option<&Path>,
+    config: &Config,
+) -> Vec<SkillDirectory> {
+    let mut dirs = Vec::new();
+    if let Some(h) = home {
+        dirs.push(SkillDirectory {
+            path: h.join(".claude").join("skills"),
+            is_global: true,
+            writable: true,
+            preserve_path: false,
+            recursive: false,
+            naming: SkillNaming::Folder,
+        });
+    }
+
+    if let Some(wd) = working_dir {
+        for path in project_skill_dirs(wd, home) {
+            dirs.push(SkillDirectory {
+                path,
+                is_global: false,
+                writable: true,
+                preserve_path: false,
+                recursive: false,
+                naming: SkillNaming::Folder,
+            });
+        }
+    }
+
+    // Plugin skills and commands, as Claude Code shows them: skills named
+    // `<plugin>:<skill>`, commands by the `name` the App server writes, which a folder
+    // cannot hold on Windows. Both are set up on each start of the code process
+    // (`server/code-chats.mjs` › `syncPlugins`).
+    for (path, plugin) in claude_plugin_skill_dirs() {
+        dirs.push(SkillDirectory {
+            path,
+            is_global: true,
+            writable: true,
+            preserve_path: false,
+            recursive: false,
+            naming: SkillNaming::PluginFolder(plugin),
+        });
+    }
+    dirs.push(SkillDirectory {
+        path: Paths::config_dir().join("skills").join("befehle"),
+        is_global: true,
+        writable: true,
+        preserve_path: false,
+        recursive: false,
+        naming: SkillNaming::Frontmatter,
+    });
+
+    // Goose's own plugins are no Claude location; they stay as in the normal profile.
+    for (path, scope) in enabled_plugin_skill_dirs_with_config(working_dir, config) {
+        dirs.push(SkillDirectory {
+            path,
+            is_global: scope == PluginScope::User,
+            writable: scope == PluginScope::User,
+            preserve_path: true,
+            recursive: true,
+            naming: SkillNaming::Frontmatter,
+        });
+    }
+    dirs
+}
+
+/// Claude Code's project skill folders: every directory at or above the working
+/// directory that has `.claude/skills`, nearest first. The walk ends at the enclosing
+/// git root, or without a repository at the home directory, which never counts as a
+/// project folder (Claude Code 2.1.318: `Xae`).
+fn project_skill_dirs(working_dir: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let start = working_dir
+        .canonicalize()
+        .unwrap_or_else(|_| working_dir.to_path_buf());
+    let home = home.map(|path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+    let mut dirs = Vec::new();
+    let mut current = Some(start.as_path());
+    while let Some(dir) = current {
+        if Some(dir) == home.as_deref() {
+            break;
+        }
+        let candidate = dir.join(".claude").join("skills");
+        if candidate.is_dir() {
+            dirs.push(candidate);
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+        current = dir.parent();
+    }
+    dirs
+}
+
+/// Skill folders of the plugins Claude Code has installed; the App links each plugin's
+/// `skills` folder here under the plugin's name (`server/code-chats.mjs` › `syncPlugins`).
+fn claude_plugin_skill_dirs() -> Vec<(PathBuf, String)> {
+    let plugins = Paths::config_dir().join("skills").join("plugins");
+    let Ok(entries) = std::fs::read_dir(plugins) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<(PathBuf, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let plugin = entry.file_name().to_str()?.to_string();
+            let path = entry.path();
+            path.is_dir().then_some((path, plugin))
+        })
+        .collect();
+    dirs.sort_by(|a, b| a.1.cmp(&b.1));
+    dirs
+}
+
+fn goose_skill_dirs(
+    home: Option<&Path>,
+    working_dir: Option<&Path>,
+    config: &Config,
+) -> Vec<SkillDirectory> {
     let mut dirs = Vec::new();
     let plugin_dirs = enabled_plugin_skill_dirs_with_config(working_dir, config);
 
@@ -329,6 +486,8 @@ fn all_skill_dirs_with_config(working_dir: Option<&Path>, config: &Config) -> Ve
                 is_global: false,
                 writable: true,
                 preserve_path: false,
+                recursive: true,
+                naming: SkillNaming::Frontmatter,
             });
         }
     }
@@ -341,16 +500,19 @@ fn all_skill_dirs_with_config(working_dir: Option<&Path>, config: &Config) -> Ve
                 is_global: false,
                 writable: false,
                 preserve_path: true,
+                recursive: true,
+                naming: SkillNaming::Frontmatter,
             }),
     );
 
-    let home = dirs::home_dir();
     if let Some(h) = home.as_ref() {
         dirs.push(SkillDirectory {
             path: h.join(".agents").join("skills"),
             is_global: true,
             writable: true,
             preserve_path: false,
+            recursive: true,
+            naming: SkillNaming::Frontmatter,
         });
     }
     dirs.push(SkillDirectory {
@@ -358,6 +520,8 @@ fn all_skill_dirs_with_config(working_dir: Option<&Path>, config: &Config) -> Ve
         is_global: true,
         writable: true,
         preserve_path: false,
+        recursive: true,
+        naming: SkillNaming::Frontmatter,
     });
     if let Some(h) = home.as_ref() {
         for path in [
@@ -369,6 +533,8 @@ fn all_skill_dirs_with_config(working_dir: Option<&Path>, config: &Config) -> Ve
                 is_global: true,
                 writable: true,
                 preserve_path: false,
+                recursive: true,
+                naming: SkillNaming::Frontmatter,
             });
         }
     }
@@ -382,6 +548,8 @@ fn all_skill_dirs_with_config(working_dir: Option<&Path>, config: &Config) -> Ve
                 is_global: true,
                 writable: true,
                 preserve_path: true,
+                recursive: true,
+                naming: SkillNaming::Frontmatter,
             }),
     );
 
@@ -435,21 +603,41 @@ fn parse_skill_content(
 /// Discover skills from all configured filesystem locations and built-ins.
 /// Each returned entry has `global` set according to the directory it was
 /// found in (or `true` for built-ins).
+/// The skill called `name`. As in Claude Code, a bare name also reaches a namespaced
+/// skill (`pdf` reaches `anthropic-skills:pdf`) if exactly one answers to it.
+pub fn find_skill<'a>(skills: &'a [SourceEntry], name: &str) -> Option<&'a SourceEntry> {
+    if let Some(skill) = skills.iter().find(|skill| skill.name == name) {
+        return Some(skill);
+    }
+    if name.contains(':') {
+        return None;
+    }
+    let suffix = format!(":{name}");
+    let mut namespaced = skills.iter().filter(|skill| skill.name.ends_with(&suffix));
+    let only = namespaced.next()?;
+    namespaced.next().is_none().then_some(only)
+}
+
 pub fn discover_skills(working_dir: Option<&Path>) -> Vec<SourceEntry> {
     discover_skills_with_config(working_dir, Config::global())
 }
 
+fn discover_skills_in_dirs(dirs: Vec<SkillDirectory>) -> Vec<SourceEntry> {
+    let roots = dirs.into_iter().map(|dir| SkillRoot {
+        path: dir.path,
+        recursive: dir.recursive,
+        naming: dir.naming,
+        global: dir.is_global,
+        writable: dir.writable,
+        preserve_path: dir.preserve_path,
+    });
+    goose_agent::skills::discover_skills(roots)
+}
+
 fn discover_skills_with_config(working_dir: Option<&Path>, config: &Config) -> Vec<SourceEntry> {
-    let roots = all_skill_dirs_with_config(working_dir, config)
-        .into_iter()
-        .map(|dir| SkillRoot {
-            path: dir.path,
-            global: dir.is_global,
-            writable: dir.writable,
-            preserve_path: dir.preserve_path,
-        });
-    let mut sources = goose_agent::skills::discover_skills(roots);
-    let mut seen: HashSet<_> = sources.iter().map(|source| source.name.clone()).collect();
+    let dirs = all_skill_dirs_with_config(working_dir, config);
+    let mut skills = discover_skills_in_dirs(dirs);
+    let mut seen: HashSet<String> = skills.iter().map(|source| source.name.clone()).collect();
     let disabled_builtins: Vec<String> = config
         .get_param("GOOSE_DISABLED_BUILTIN_SKILLS")
         .unwrap_or_default();
@@ -459,7 +647,7 @@ fn discover_skills_with_config(working_dir: Option<&Path>, config: &Config) -> V
             if !seen.contains(&source.name) && !disabled_builtins.contains(&source.name) {
                 seen.insert(source.name.clone());
                 let path = format!("builtin://skills/{}", source.name);
-                sources.push(SourceEntry {
+                skills.push(SourceEntry {
                     source_type: SourceType::BuiltinSkill,
                     path,
                     ..source
@@ -468,7 +656,7 @@ fn discover_skills_with_config(working_dir: Option<&Path>, config: &Config) -> V
         }
     }
 
-    sources
+    skills
 }
 
 pub fn list_installed_skills(working_dir: Option<&Path>) -> Vec<SourceEntry> {
@@ -1046,5 +1234,410 @@ mod tests {
 
         crate::sources::delete_source(SourceType::Skill, &skill.path).unwrap();
         assert!(!skill_dir.exists());
+    }
+
+    #[test]
+    fn claude_profile_reads_claude_locations_one_level_deep() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let path_root = tempfile::tempdir().unwrap();
+        let personal = home.path().join(".claude/skills");
+        write_test_skill(
+            &personal.join("personal-skill"),
+            "personal-skill",
+            "personal",
+        );
+        write_test_skill(&personal.join("shared"), "shared", "personal shared");
+        write_test_skill(
+            &personal.join("personal-skill/bundles/nested-skill"),
+            "nested-skill",
+            "nested",
+        );
+        write_test_skill(
+            &personal.join("_Archiv/archived-skill"),
+            "archived-skill",
+            "archived",
+        );
+        write_test_skill(
+            &personal.join("synced/account_pair/synced-skill"),
+            "synced-skill",
+            "synced",
+        );
+        write_test_skill(
+            &home.path().join(".agents/skills/agents-skill"),
+            "agents-skill",
+            "agents",
+        );
+        write_test_skill(
+            &project.path().join(".claude/skills/project-skill"),
+            "project-skill",
+            "project",
+        );
+        write_test_skill(
+            &project.path().join(".claude/skills/shared"),
+            "shared",
+            "project shared",
+        );
+        write_test_skill(
+            &project.path().join(".agents/skills/project-agents-skill"),
+            "project-agents-skill",
+            "agents",
+        );
+        write_test_skill(
+            &project.path().join(".goose/skills/project-goose-skill"),
+            "project-goose-skill",
+            "goose",
+        );
+
+        let config = Config::new(path_root.path().join("test-config.yaml"), "skills-test").unwrap();
+        let _guard = env_lock::lock_env([
+            ("GOOSE_PATH_ROOT", path_root.path().to_str()),
+            ("PLUGINS", None),
+        ]);
+        let dirs = skill_dirs_with_config(true, Some(home.path()), Some(project.path()), &config);
+        let skills = discover_skills_in_dirs(dirs);
+
+        let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(names.contains(&"personal-skill"), "{names:?}");
+        assert!(names.contains(&"project-skill"), "{names:?}");
+        for absent in [
+            "nested-skill",
+            "archived-skill",
+            "synced-skill",
+            "agents-skill",
+            "project-agents-skill",
+            "project-goose-skill",
+        ] {
+            assert!(!names.contains(&absent), "{absent} listed: {names:?}");
+        }
+
+        let shared = skills.iter().find(|skill| skill.name == "shared").unwrap();
+        assert_eq!(shared.content.trim(), "personal shared");
+        assert!(
+            Path::new(&shared.path).starts_with(personal.join("shared").canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn goose_profile_keeps_recursive_agent_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let path_root = tempfile::tempdir().unwrap();
+        write_test_skill(
+            &home.path().join(".agents/skills/agents-skill"),
+            "agents-skill",
+            "agents",
+        );
+        write_test_skill(
+            &home.path().join(".agents/skills/_Archiv/archived-skill"),
+            "archived-skill",
+            "archived",
+        );
+        write_test_skill(
+            &project.path().join(".agents/skills/project-skill"),
+            "project-skill",
+            "project",
+        );
+
+        let config = Config::new(path_root.path().join("test-config.yaml"), "skills-test").unwrap();
+        let _guard = env_lock::lock_env([
+            ("GOOSE_PATH_ROOT", path_root.path().to_str()),
+            ("PLUGINS", None),
+        ]);
+        let dirs = skill_dirs_with_config(false, Some(home.path()), Some(project.path()), &config);
+
+        assert_eq!(
+            dirs.first().map(|dir| dir.path.clone()),
+            Some(project.path().join(".agents/skills"))
+        );
+        assert!(dirs
+            .iter()
+            .any(|dir| dir.path == home.path().join(".agents/skills") && dir.recursive));
+
+        let skills = discover_skills_in_dirs(dirs);
+        let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(names.contains(&"agents-skill"), "{names:?}");
+        assert!(names.contains(&"archived-skill"), "{names:?}");
+        assert!(names.contains(&"project-skill"), "{names:?}");
+    }
+
+    #[test]
+    fn claude_profile_names_plugin_skills_by_plugin() {
+        let home = tempfile::tempdir().unwrap();
+        let path_root = tempfile::tempdir().unwrap();
+        let plugins = path_root.path().join("config/skills/plugins");
+        write_test_skill(
+            &plugins.join("expo/eas-app-stores"),
+            "eas-app-stores",
+            "expo body",
+        );
+        write_test_skill(
+            &plugins.join("expo/expo-router"),
+            "expo:expo-router",
+            "already prefixed",
+        );
+        write_test_skill(&plugins.join("pdf-viewer/annotate"), "annotate", "pdf body");
+        write_test_skill(&plugins.join("anthropic-skills/pdf"), "pdf", "synced body");
+        write_test_skill(
+            &path_root.path().join("config/skills/befehle/annotate"),
+            "annotate",
+            "command body",
+        );
+
+        let config = Config::new(path_root.path().join("test-config.yaml"), "skills-test").unwrap();
+        let _guard = env_lock::lock_env([
+            ("GOOSE_PATH_ROOT", path_root.path().to_str()),
+            ("PLUGINS", None),
+        ]);
+        let dirs = skill_dirs_with_config(true, Some(home.path()), None, &config);
+        let skills = discover_skills_in_dirs(dirs);
+
+        let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(names.contains(&"expo:eas-app-stores"), "{names:?}");
+        assert!(names.contains(&"expo:expo-router"), "{names:?}");
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "expo:expo-router")
+                .count(),
+            1,
+            "{names:?}"
+        );
+        assert!(names.contains(&"pdf-viewer:annotate"), "{names:?}");
+        assert!(names.contains(&"anthropic-skills:pdf"), "{names:?}");
+        assert!(names.contains(&"annotate"), "{names:?}");
+        assert!(!names.contains(&"eas-app-stores"), "{names:?}");
+    }
+
+    #[test]
+    fn claude_profile_names_a_skill_after_its_folder_whatever_its_frontmatter() {
+        let home = tempfile::tempdir().unwrap();
+        let path_root = tempfile::tempdir().unwrap();
+        let personal = home.path().join(".claude/skills");
+        write_test_skill(&personal.join("folder-name"), "frontmatter-name", "renamed");
+        std::fs::create_dir_all(personal.join("no-frontmatter")).unwrap();
+        std::fs::write(personal.join("no-frontmatter/SKILL.md"), "just text").unwrap();
+        std::fs::create_dir_all(personal.join("broken-frontmatter")).unwrap();
+        std::fs::write(
+            personal.join("broken-frontmatter/SKILL.md"),
+            "---\ndescription: one: two: [\n---\nbody",
+        )
+        .unwrap();
+
+        let config = Config::new(path_root.path().join("test-config.yaml"), "skills-test").unwrap();
+        let _guard = env_lock::lock_env([
+            ("GOOSE_PATH_ROOT", path_root.path().to_str()),
+            ("PLUGINS", None),
+        ]);
+        let dirs = skill_dirs_with_config(true, Some(home.path()), None, &config);
+        let skills = discover_skills_in_dirs(dirs);
+
+        let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(names.contains(&"folder-name"), "{names:?}");
+        assert!(!names.contains(&"frontmatter-name"), "{names:?}");
+        assert!(names.contains(&"no-frontmatter"), "{names:?}");
+        assert!(names.contains(&"broken-frontmatter"), "{names:?}");
+    }
+
+    #[test]
+    fn a_bare_name_reaches_the_one_namespaced_skill_answering_to_it() {
+        let skill = |name: &str| SourceEntry {
+            source_type: SourceType::Skill,
+            name: name.to_string(),
+            description: String::new(),
+            content: String::new(),
+            path: String::new(),
+            global: true,
+            writable: false,
+            supporting_files: Vec::new(),
+            properties: HashMap::new(),
+        };
+        let skills = vec![
+            skill("inventar"),
+            skill("anthropic-skills:inventar"),
+            skill("anthropic-skills:pdf"),
+            skill("design:ux-copy"),
+            skill("expo:ux-copy"),
+        ];
+        let found = |name: &str| find_skill(&skills, name).map(|skill| skill.name.as_str());
+
+        assert_eq!(found("inventar"), Some("inventar"));
+        assert_eq!(
+            found("anthropic-skills:inventar"),
+            Some("anthropic-skills:inventar")
+        );
+        assert_eq!(found("pdf"), Some("anthropic-skills:pdf"));
+        assert_eq!(found("ux-copy"), None);
+        assert_eq!(found("other:pdf"), None);
+    }
+
+    #[test]
+    fn claude_profile_reads_every_parent_project_folder_nearest_first() {
+        let home = tempfile::tempdir().unwrap();
+        let path_root = tempfile::tempdir().unwrap();
+        let top = home.path().join("work");
+        write_test_skill(&top.join(".claude/skills/top-skill"), "top-skill", "top");
+        write_test_skill(&top.join(".claude/skills/shared"), "shared", "top shared");
+        write_test_skill(
+            &top.join("sub/.claude/skills/sub-skill"),
+            "sub-skill",
+            "sub",
+        );
+        write_test_skill(
+            &top.join("sub/.claude/skills/shared"),
+            "shared",
+            "sub shared",
+        );
+        write_test_skill(
+            &top.join("sub/deep/.claude/skills/deep-skill"),
+            "deep-skill",
+            "deep",
+        );
+        let working_dir = top.join("sub/deep/nested");
+        std::fs::create_dir_all(&working_dir).unwrap();
+
+        let config = Config::new(path_root.path().join("test-config.yaml"), "skills-test").unwrap();
+        let _guard = env_lock::lock_env([
+            ("GOOSE_PATH_ROOT", path_root.path().to_str()),
+            ("PLUGINS", None),
+        ]);
+        let dirs = skill_dirs_with_config(
+            true,
+            Some(home.path()),
+            Some(working_dir.as_path()),
+            &config,
+        );
+        let skills = discover_skills_in_dirs(dirs);
+
+        let index = |name: &str| {
+            skills
+                .iter()
+                .position(|skill| skill.name == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name} missing: {:?}",
+                        skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+                    )
+                })
+        };
+        assert!(index("deep-skill") < index("sub-skill"));
+        assert!(index("sub-skill") < index("top-skill"));
+        let shared = skills.iter().find(|skill| skill.name == "shared").unwrap();
+        assert_eq!(shared.content.trim(), "sub shared");
+    }
+
+    #[test]
+    fn claude_profile_stops_project_folders_at_the_git_root() {
+        let home = tempfile::tempdir().unwrap();
+        let path_root = tempfile::tempdir().unwrap();
+        let work = home.path().join("work");
+        write_test_skill(
+            &work.join(".claude/skills/above-repo-skill"),
+            "above-repo-skill",
+            "above",
+        );
+        let repo = work.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        write_test_skill(
+            &repo.join(".claude/skills/repo-skill"),
+            "repo-skill",
+            "repo",
+        );
+        let working_dir = repo.join("crate/deep");
+        std::fs::create_dir_all(&working_dir).unwrap();
+
+        let config = Config::new(path_root.path().join("test-config.yaml"), "skills-test").unwrap();
+        let _guard = env_lock::lock_env([
+            ("GOOSE_PATH_ROOT", path_root.path().to_str()),
+            ("PLUGINS", None),
+        ]);
+        let dirs = skill_dirs_with_config(
+            true,
+            Some(home.path()),
+            Some(working_dir.as_path()),
+            &config,
+        );
+        let names: Vec<String> = discover_skills_in_dirs(dirs)
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        assert!(names.contains(&"repo-skill".to_string()), "{names:?}");
+        assert!(
+            !names.contains(&"above-repo-skill".to_string()),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn claude_profile_skips_reserved_synced_folders_but_reads_dot_named_skills() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let path_root = tempfile::tempdir().unwrap();
+        let personal = home.path().join(".claude/skills");
+        write_test_skill(&personal.join("Synced"), "reserved-probe", "reserved");
+        write_test_skill(&personal.join(".hidden-probe"), "hidden-probe", "hidden");
+        write_test_skill(
+            &project.path().join(".claude/skills/synced"),
+            "project-reserved-probe",
+            "project reserved",
+        );
+        write_test_skill(
+            &project.path().join(".claude/skills/.project-hidden"),
+            "project-hidden",
+            "project hidden",
+        );
+
+        let config = Config::new(path_root.path().join("test-config.yaml"), "skills-test").unwrap();
+        let _guard = env_lock::lock_env([
+            ("GOOSE_PATH_ROOT", path_root.path().to_str()),
+            ("PLUGINS", None),
+        ]);
+        let dirs = skill_dirs_with_config(true, Some(home.path()), Some(project.path()), &config);
+        let names: Vec<String> = discover_skills_in_dirs(dirs)
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        assert!(names.contains(&".hidden-probe".to_string()), "{names:?}");
+        assert!(names.contains(&".project-hidden".to_string()), "{names:?}");
+        assert!(!names.contains(&"reserved-probe".to_string()), "{names:?}");
+        assert!(
+            !names.contains(&"project-reserved-probe".to_string()),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn claude_profile_skips_a_skill_file_an_earlier_root_already_supplied() {
+        let personal = tempfile::tempdir().unwrap();
+        write_test_skill(&personal.path().join("shared-file"), "shared-file", "body");
+        std::fs::create_dir_all(personal.path().join("notes")).unwrap();
+        let roots = vec![
+            SkillRoot {
+                path: personal.path().to_path_buf(),
+                recursive: false,
+                naming: SkillNaming::Folder,
+                global: true,
+                writable: true,
+                preserve_path: false,
+            },
+            SkillRoot {
+                path: personal.path().join("notes").join(".."),
+                recursive: false,
+                naming: SkillNaming::PluginFolder("design".to_string()),
+                global: true,
+                writable: true,
+                preserve_path: false,
+            },
+        ];
+
+        let names: Vec<String> = goose_agent::skills::discover_skills(roots)
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        assert!(names.contains(&"shared-file".to_string()), "{names:?}");
+        assert!(
+            !names.contains(&"design:shared-file".to_string()),
+            "{names:?}"
+        );
     }
 }

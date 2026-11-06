@@ -51,15 +51,17 @@ pub fn resolve_command(
         return Ok(None);
     }
     let command_name = normalize_command_name(command);
-    let Some(skill) = crate::skills::list_installed_skills(working_dir)
-        .into_iter()
+    let skills = crate::skills::list_installed_skills(working_dir);
+    let Some(skill) = skills
+        .iter()
         .find(|skill| normalize_command_name(&skill.name) == command_name)
+        .or_else(|| crate::skills::find_skill(&skills, &command_name))
     else {
         return Ok(None);
     };
 
     let args = (!params_str.is_empty()).then_some(params_str);
-    let prompt = crate::skills::loaded_skill_context_with_args(&skill, args)
+    let prompt = crate::skills::loaded_skill_context_with_args(skill, args)
         .map_err(|e| format!("Skill /{}: {}", command, e))?;
 
     Ok(Some(prompt))

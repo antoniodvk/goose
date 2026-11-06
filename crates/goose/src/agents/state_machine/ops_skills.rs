@@ -202,7 +202,13 @@ fn skill_instructions(session: &Session) -> Option<String> {
     let mode = |name: &str| {
         rules
             .as_ref()
-            .and_then(|r| r.overrides.get(name))
+            .and_then(|r| {
+                // Claude Code also accepts the bare name of a synced skill here.
+                let bare = name.strip_prefix("anthropic-skills:");
+                r.overrides
+                    .get(name)
+                    .or_else(|| bare.and_then(|bare| r.overrides.get(bare)))
+            })
             .map(String::as_str)
             .unwrap_or("on")
     };
@@ -246,7 +252,7 @@ fn execute_skill(working_dir: &Path, arguments: Option<JsonObject>) -> CallToolR
     let args = params.args.as_deref();
     let skills = crate::skills::discover_skills(Some(working_dir));
 
-    if let Some(skill) = skills.iter().find(|skill| skill.name == skill_name) {
+    if let Some(skill) = crate::skills::find_skill(&skills, skill_name) {
         return match crate::skills::loaded_skill_context_with_args(skill, args) {
             Ok(rendered) => CallToolResult::success(vec![ContentBlock::text(rendered)]),
             Err(error) => CallToolResult::error(vec![ContentBlock::text(format!(
@@ -257,12 +263,11 @@ fn execute_skill(working_dir: &Path, arguments: Option<JsonObject>) -> CallToolR
 
     if let Some((parent_skill_name, raw_relative_path)) = skill_name.split_once('/') {
         let relative_path = raw_relative_path.replace('\\', "/");
-        if let Some(skill) = skills.iter().find(|skill| {
-            skill.name == parent_skill_name
-                && matches!(
-                    skill.source_type,
-                    SourceType::Skill | SourceType::BuiltinSkill
-                )
+        if let Some(skill) = crate::skills::find_skill(&skills, parent_skill_name).filter(|skill| {
+            matches!(
+                skill.source_type,
+                SourceType::Skill | SourceType::BuiltinSkill
+            )
         }) {
             return load_supporting_file(skill, skill_name, &relative_path);
         }
