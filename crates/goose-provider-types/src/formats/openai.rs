@@ -1,5 +1,7 @@
 use crate::base::ThinkingPreservationFormat;
-use crate::conversation::message::{Message, MessageContentBlock, ProviderMetadata};
+use crate::conversation::message::{
+    Message, MessageContentBlock, ProviderMetadata, RESPONSES_REPLAY_KEY,
+};
 use crate::conversation::token_usage::{CostSource, ProviderUsage, Usage};
 use crate::documents::{
     convert_document, convert_video_url, document_media_type_is_supported, is_video_media_type,
@@ -355,7 +357,13 @@ pub fn format_messages_with_options(
                                     name: sanitized_name,
                                     arguments: arguments_str,
                                 },
-                                metadata: request.metadata.clone().unwrap_or_default(),
+                                metadata: request
+                                    .metadata
+                                    .iter()
+                                    .flatten()
+                                    .filter(|(key, _)| *key != RESPONSES_REPLAY_KEY)
+                                    .map(|(key, value)| (key.clone(), value.clone()))
+                                    .collect(),
                             });
                     }
                     Err(_e) => {
@@ -2188,6 +2196,28 @@ mod tests {
 
     fn test_model_config(model_name: &str) -> ModelConfig {
         ModelConfig::new(model_name)
+    }
+
+    #[test]
+    fn responses_replay_does_not_reach_the_wire() {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("thoughtSignature".to_string(), json!("sig"));
+        metadata.insert(
+            RESPONSES_REPLAY_KEY.to_string(),
+            json!({ "phase": "commentary" }),
+        );
+
+        let message = Message::assistant().with_tool_request_with_metadata(
+            "tool1",
+            Ok(CallToolRequestParams::new("test_tool").with_arguments(object!({}))),
+            Some(&metadata),
+            None,
+        );
+
+        let spec = format_messages(&[message], &ImageFormat::OpenAi);
+        let tool_call = &spec[0]["tool_calls"][0];
+        assert_eq!(tool_call["thoughtSignature"], "sig");
+        assert!(tool_call.get(RESPONSES_REPLAY_KEY).is_none());
     }
 
     #[test]

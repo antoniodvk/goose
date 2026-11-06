@@ -1,5 +1,5 @@
 use crate::config::paths::Paths;
-use crate::conversation::message::{Message, MessageContent};
+use crate::conversation::message::{Message, MessageContent, ToolRequest, RESPONSES_REPLAY_KEY};
 use crate::providers::api_client::{AuthProvider, RequestBuilderDecorator};
 use crate::providers::base::{
     ConfigKey, MessageStream, Provider, ProviderDef, ProviderMetadata,
@@ -167,7 +167,33 @@ impl ChatGptCodexAuthState {
 static CHATGPT_CODEX_AUTH_STATE: LazyLock<Arc<ChatGptCodexAuthState>> =
     LazyLock::new(|| Arc::new(ChatGptCodexAuthState::new()));
 
-fn build_input_items(messages: &[Message]) -> Result<Vec<Value>> {
+/// The reasoning items and `phase` to send back with this tool call. Reasoning
+/// is only valid for the model that produced it.
+fn replay_for<'a>(request: &'a ToolRequest, model_name: &str) -> Option<&'a Value> {
+    request
+        .metadata
+        .as_ref()?
+        .get(RESPONSES_REPLAY_KEY)
+        .filter(|replay| replay["model"] == model_name)
+}
+
+/// Replay data arrives from the shared Responses parser, which does not know
+/// the configured model name; `replay_for` compares against that name.
+fn stamp_replay_model(message: &mut Message, model_name: &str) {
+    for content in &mut message.content {
+        if let MessageContent::ToolRequest(request) = content {
+            if let Some(Value::Object(replay)) = request
+                .metadata
+                .as_mut()
+                .and_then(|metadata| metadata.get_mut(RESPONSES_REPLAY_KEY))
+            {
+                replay.insert("model".to_string(), json!(model_name));
+            }
+        }
+    }
+}
+
+fn build_input_items(messages: &[Message], model_name: &str) -> Result<Vec<Value>> {
     let mut items = Vec::new();
 
     for message in messages {
@@ -177,10 +203,17 @@ fn build_input_items(messages: &[Message]) -> Result<Vec<Value>> {
         };
         let mut content_items: Vec<Value> = Vec::new();
 
-        let flush_text = |items: &mut Vec<Value>, role: Option<&str>, content: &mut Vec<Value>| {
+        let flush_text = |items: &mut Vec<Value>,
+                          role: Option<&str>,
+                          content: &mut Vec<Value>,
+                          phase: Option<&Value>| {
             if let Some(role) = role {
                 if !content.is_empty() {
-                    items.push(json!({ "role": role, "content": std::mem::take(content) }));
+                    let mut item = json!({ "role": role, "content": std::mem::take(content) });
+                    if let Some(phase) = phase {
+                        item["phase"] = phase.clone();
+                    }
+                    items.push(item);
                 }
             } else {
                 content.clear();
@@ -206,7 +239,17 @@ fn build_input_items(messages: &[Message]) -> Result<Vec<Value>> {
                     }));
                 }
                 MessageContent::ToolRequest(request) => {
-                    flush_text(&mut items, role, &mut content_items);
+                    // The model reasons first, then writes its preamble, then calls
+                    // the tool; the preamble is still buffered in `content_items`.
+                    let replay = replay_for(request, model_name);
+                    if let Some(reasoning) = replay
+                        .and_then(|replay| replay.get("reasoning"))
+                        .and_then(Value::as_array)
+                    {
+                        items.extend(reasoning.iter().cloned());
+                    }
+                    let phase = replay.and_then(|replay| replay.get("phase"));
+                    flush_text(&mut items, role, &mut content_items, phase);
                     if let Ok(tool_call) = &request.tool_call {
                         let arguments_str = match tool_call.arguments.as_ref() {
                             Some(args) => serde_json::to_string(args)?,
@@ -221,7 +264,7 @@ fn build_input_items(messages: &[Message]) -> Result<Vec<Value>> {
                     }
                 }
                 MessageContent::ToolResponse(response) => {
-                    flush_text(&mut items, role, &mut content_items);
+                    flush_text(&mut items, role, &mut content_items, None);
                     match &response.tool_result {
                         Ok(contents) => {
                             let text_content: Vec<String> = contents
@@ -256,7 +299,7 @@ fn build_input_items(messages: &[Message]) -> Result<Vec<Value>> {
             }
         }
 
-        flush_text(&mut items, role, &mut content_items);
+        flush_text(&mut items, role, &mut content_items, None);
     }
 
     Ok(items)
@@ -320,7 +363,7 @@ fn create_codex_request(
     tools: &[Tool],
     reasoning_levels: Option<&[String]>,
 ) -> Result<Value> {
-    let input_items = build_input_items(messages)?;
+    let input_items = build_input_items(messages, &model_config.model_name)?;
     let reasoning_effort =
         reasoning_levels.and_then(|levels| reasoning_effort_for_config(model_config, levels));
 
@@ -328,6 +371,7 @@ fn create_codex_request(
         "model": model_config.model_name,
         "input": input_items,
         "store": false,
+        "include": ["reasoning.encrypted_content"],
         "instructions": system,
     });
 
@@ -1191,6 +1235,7 @@ impl Provider for ChatGptCodexProvider {
             .await?;
 
         let stream = response.bytes_stream().map_err(io::Error::other);
+        let model_name = model_config.model_name.clone();
 
         Ok(Box::pin(try_stream! {
             let stream_reader = StreamReader::new(stream);
@@ -1199,10 +1244,13 @@ impl Provider for ChatGptCodexProvider {
             let message_stream = responses_api_to_streaming_message(framed);
             pin!(message_stream);
             while let Some(message) = message_stream.next().await {
-                let (message, usage) = message.map_err(|e| {
+                let (mut message, usage) = message.map_err(|e| {
                     e.downcast::<ProviderError>()
                         .unwrap_or_else(ProviderError::stream_decode_error)
                 })?;
+                if let Some(message) = &mut message {
+                    stamp_replay_model(message, &model_name);
+                }
                 yield (message, usage);
             }
         }))
@@ -1404,16 +1452,93 @@ mod tests {
         "image content included in user message"
     )]
     fn test_codex_input_order(messages: Vec<Message>, expected: Vec<String>) {
-        let items = build_input_items(&messages).unwrap();
+        let items = build_input_items(&messages, "gpt-6.1-terra").unwrap();
         let payload = json!({ "input": items });
         let kinds = input_kinds(&payload);
         assert_eq!(kinds, expected);
     }
 
+    fn assistant_with_replay(replay: Value) -> Message {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(RESPONSES_REPLAY_KEY.to_string(), replay);
+        Message::assistant()
+            .with_text("Ich sehe nach.")
+            .with_tool_request_with_metadata(
+                "call_1",
+                Ok(CallToolRequestParams::new("shell").with_arguments(object!({}))),
+                Some(&metadata),
+                None,
+            )
+    }
+
+    fn terra_replay() -> Value {
+        json!({
+            "model": "gpt-6.1-terra",
+            "phase": "commentary",
+            "reasoning": [{ "type": "reasoning", "summary": [], "encrypted_content": "enc-1" }],
+        })
+    }
+
+    #[test]
+    fn replay_goes_back_in_the_order_the_model_wrote_it() {
+        let messages = vec![
+            Message::user().with_text("Los"),
+            assistant_with_replay(terra_replay()),
+        ];
+
+        let items = build_input_items(&messages, "gpt-6.1-terra").unwrap();
+
+        assert_eq!(items[1]["type"], "reasoning");
+        assert_eq!(items[1]["encrypted_content"], "enc-1");
+        assert_eq!(items[2]["role"], "assistant");
+        assert_eq!(items[2]["phase"], "commentary");
+        assert_eq!(items[3]["type"], "function_call");
+    }
+
+    #[test]
+    fn replay_is_not_sent_to_another_model() {
+        let messages = vec![assistant_with_replay(terra_replay())];
+
+        let items = build_input_items(&messages, "gpt-6-sol").unwrap();
+
+        assert_eq!(items[0]["role"], "assistant");
+        assert!(items[0].get("phase").is_none());
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn replay_stamped_by_the_stream_matches_the_request_model() {
+        let mut message = assistant_with_replay(json!({ "phase": "commentary" }));
+
+        stamp_replay_model(&mut message, "gpt-6.1-terra");
+        let items = build_input_items(&[message], "gpt-6.1-terra").unwrap();
+
+        assert_eq!(items[0]["phase"], "commentary");
+    }
+
+    #[test]
+    fn user_text_never_carries_a_phase() {
+        let messages = vec![Message::user().with_text("Los")];
+
+        let items = build_input_items(&messages, "gpt-6.1-terra").unwrap();
+
+        assert!(items[0].get("phase").is_none());
+    }
+
+    #[test]
+    fn test_create_codex_request_asks_for_encrypted_reasoning() {
+        let model_config = ModelConfig::new("gpt-6.1-terra");
+        let payload = create_codex_request(&model_config, "", &[], &[], None).unwrap();
+
+        assert_eq!(payload["store"], false);
+        assert_eq!(payload["include"], json!(["reasoning.encrypted_content"]));
+    }
+
     #[test]
     fn test_image_url_format() {
         let messages = vec![Message::user().with_image(TEST_IMAGE_B64, "image/png")];
-        let items = build_input_items(&messages).unwrap();
+        let items = build_input_items(&messages, "gpt-6.1-terra").unwrap();
         // The image is inside the content array of the user message
         let content = items[0]["content"].as_array().unwrap();
         let image_item = &content[0];

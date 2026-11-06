@@ -81,6 +81,12 @@ where
 /// Provider-specific metadata for tool requests/responses.
 /// Allows providers to store custom data without polluting the core model.
 pub type ProviderMetadata = serde_json::Map<String, serde_json::Value>;
+
+/// Key in `ToolRequest.metadata` for what a stateless Responses API conversation
+/// (`store: false`) has to send back: the reasoning items that led to the tool
+/// call and the `phase` of the assistant text before it. Only the provider that
+/// received them replays them; formats that copy metadata onto the wire skip it.
+pub const RESPONSES_REPLAY_KEY: &str = "responsesReplay";
 pub type ToolResult<T> = Result<T, rmcp::model::ErrorData>;
 
 pub(crate) fn sanitize_tool_result_in_place(tool_result: &mut ToolResult<CallToolResult>) {

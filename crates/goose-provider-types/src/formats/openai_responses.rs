@@ -1,4 +1,6 @@
-use crate::conversation::message::{Message, MessageContentBlock};
+use crate::conversation::message::{
+    Message, MessageContentBlock, ProviderMetadata, RESPONSES_REPLAY_KEY,
+};
 use crate::conversation::token_usage::{ProviderUsage, Usage};
 use crate::documents::{
     convert_document, document_media_type_is_supported, unsupported_document_text, DocumentFormat,
@@ -363,6 +365,8 @@ pub enum ResponseOutputItemInfo {
         id: Option<String>,
         #[serde(default)]
         summary: Vec<SummaryText>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
     },
     Message {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -371,6 +375,8 @@ pub enum ResponseOutputItemInfo {
         status: Option<String>,
         role: String,
         content: Vec<ContentBlockPart>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
     },
     FunctionCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -982,19 +988,70 @@ pub fn get_responses_usage(response: &ResponsesApiResponse) -> Usage {
         .map_or_else(Usage::default, ResponseUsage::to_usage)
 }
 
+/// Reasoning and `phase` seen since the last tool call of a response, waiting
+/// for the tool call that carries them. A text-only answer has no tool call: the
+/// model only needs them back within the turn, which ends with that answer.
+#[derive(Default)]
+struct PendingReplay {
+    reasoning: Vec<Value>,
+    phase: Option<String>,
+}
+
+impl PendingReplay {
+    fn take_metadata(&mut self) -> Option<ProviderMetadata> {
+        if self.reasoning.is_empty() && self.phase.is_none() {
+            return None;
+        }
+        let mut replay = serde_json::Map::new();
+        if !self.reasoning.is_empty() {
+            replay.insert(
+                "reasoning".to_string(),
+                Value::Array(std::mem::take(&mut self.reasoning)),
+            );
+        }
+        if let Some(phase) = self.phase.take() {
+            replay.insert("phase".to_string(), Value::String(phase));
+        }
+        let mut metadata = ProviderMetadata::new();
+        metadata.insert(RESPONSES_REPLAY_KEY.to_string(), Value::Object(replay));
+        Some(metadata)
+    }
+}
+
 fn process_streaming_output_items(
     output_items: Vec<ResponseOutputItemInfo>,
     is_text_response: bool,
 ) -> anyhow::Result<Vec<MessageContentBlock>> {
     let mut content = Vec::new();
     let mut tool_request_ids = HashSet::new();
+    let mut pending_replay = PendingReplay::default();
 
     for item in output_items {
         match item {
-            ResponseOutputItemInfo::Reasoning { summary, .. } => {
+            ResponseOutputItemInfo::Reasoning {
+                summary,
+                encrypted_content,
+                ..
+            } => {
                 content.extend(reasoning_from_summary(&summary));
+                if let Some(encrypted_content) = encrypted_content {
+                    let summary: Vec<Value> = summary
+                        .iter()
+                        .map(|s| json!({ "type": "summary_text", "text": s.text }))
+                        .collect();
+                    pending_replay.reasoning.push(json!({
+                        "type": "reasoning",
+                        "summary": summary,
+                        "encrypted_content": encrypted_content,
+                    }));
+                }
             }
-            ResponseOutputItemInfo::Message { content: parts, .. } => {
+            ResponseOutputItemInfo::Message {
+                content: parts,
+                phase,
+                ..
+            } => {
+                pending_replay.phase = phase.or(pending_replay.phase.take());
                 for part in parts {
                     match part {
                         ContentBlockPart::OutputText { text, .. } => {
@@ -1045,10 +1102,11 @@ fn process_streaming_output_items(
                 let request_id = sanitize_tool_request_id(&request_id, &mut tool_request_ids)?;
                 let parsed_args = parse_tool_arguments(&arguments)?;
 
-                content.push(MessageContentBlock::tool_request(
+                content.push(MessageContentBlock::tool_request_with_metadata(
                     request_id,
                     Ok(CallToolRequestParams::new(strip_unicode_tags(&name))
                         .with_arguments(object(parsed_args))),
+                    pending_replay.take_metadata().as_ref(),
                 ));
             }
         }
@@ -1647,6 +1705,116 @@ mod tests {
         assert_eq!(usage.usage.input_tokens, Some(10));
         assert_eq!(usage.usage.output_tokens, Some(4));
         assert_eq!(usage.usage.total_tokens, Some(14));
+
+        Ok(())
+    }
+
+    fn replay_of(content: &MessageContentBlock) -> Option<&Value> {
+        match content {
+            MessageContentBlock::ToolRequest(request) => {
+                request.metadata.as_ref()?.get(RESPONSES_REPLAY_KEY)
+            }
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_keeps_reasoning_and_phase_for_the_tool_call() -> anyhow::Result<()> {
+        let lines = vec![
+            r#"data: {"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"enc-1"}}"#.to_string(),
+            r#"data: {"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":1,"content_index":0,"delta":"Ich sehe nach."}"#.to_string(),
+            r#"data: {"type":"response.output_item.done","sequence_number":3,"output_index":1,"item":{"type":"message","id":"msg_1","status":"completed","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Ich sehe nach."}]}}"#.to_string(),
+            r#"data: {"type":"response.output_item.done","sequence_number":4,"output_index":2,"item":{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{}"}}"#.to_string(),
+            r#"data: {"type":"response.output_item.done","sequence_number":5,"output_index":3,"item":{"type":"function_call","call_id":"call_2","name":"shell","arguments":"{}"}}"#.to_string(),
+            r#"data: {"type":"response.completed","sequence_number":6,"response":{"id":"resp_1","object":"response","created_at":1737368310,"status":"completed","model":"gpt-6.1-terra","output":[],"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}}"#.to_string(),
+        ];
+
+        let response_stream = tokio_stream::iter(lines.into_iter().map(Ok));
+        let messages = responses_api_to_streaming_message(response_stream);
+        futures::pin_mut!(messages);
+
+        let mut content = Vec::new();
+        while let Some(item) = messages.next().await {
+            if let (Some(message), _) = item? {
+                content.extend(message.content);
+            }
+        }
+
+        let tool_requests: Vec<_> = content
+            .iter()
+            .filter(|c| matches!(c, MessageContentBlock::ToolRequest(_)))
+            .collect();
+        assert_eq!(tool_requests.len(), 2);
+
+        let replay = replay_of(tool_requests[0]).expect("first tool call carries the replay");
+        assert_eq!(replay["phase"], "commentary");
+        assert_eq!(replay["reasoning"].as_array().map(Vec::len), Some(1));
+        assert_eq!(replay["reasoning"][0]["type"], "reasoning");
+        assert_eq!(replay["reasoning"][0]["encrypted_content"], "enc-1");
+        assert_eq!(replay["reasoning"][0]["summary"], json!([]));
+        assert!(
+            replay["reasoning"][0].get("id").is_none(),
+            "a stored id does not exist with store: false"
+        );
+        assert!(replay_of(tool_requests[1]).is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_stays_with_the_tool_call_it_led_to() -> anyhow::Result<()> {
+        let reasoning = |text: &str| ResponseOutputItemInfo::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            encrypted_content: Some(text.to_string()),
+        };
+        let call = |id: &str| ResponseOutputItemInfo::FunctionCall {
+            id: None,
+            status: None,
+            call_id: Some(id.to_string()),
+            name: "shell".to_string(),
+            arguments: "{}".to_string(),
+        };
+
+        let content = process_streaming_output_items(
+            vec![
+                reasoning("enc-1"),
+                call("call_1"),
+                reasoning("enc-2"),
+                call("call_2"),
+            ],
+            false,
+        )?;
+
+        assert_eq!(
+            replay_of(&content[0]).unwrap()["reasoning"][0]["encrypted_content"],
+            "enc-1"
+        );
+        assert_eq!(
+            replay_of(&content[1]).unwrap()["reasoning"][0]["encrypted_content"],
+            "enc-2"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn answers_without_replay_data_add_no_metadata() -> anyhow::Result<()> {
+        let content = process_streaming_output_items(
+            vec![ResponseOutputItemInfo::FunctionCall {
+                id: None,
+                status: None,
+                call_id: Some("call_1".to_string()),
+                name: "shell".to_string(),
+                arguments: "{}".to_string(),
+            }],
+            false,
+        )?;
+
+        match &content[0] {
+            MessageContentBlock::ToolRequest(request) => assert!(request.metadata.is_none()),
+            other => panic!("expected a tool request, got {other:?}"),
+        }
 
         Ok(())
     }
@@ -3083,6 +3251,7 @@ mod tests {
         let output_items = vec![ResponseOutputItemInfo::Message {
             id: Some("msg_1".to_string()),
             status: Some("completed".to_string()),
+            phase: None,
             role: "assistant".to_string(),
             content: vec![ContentBlockPart::Refusal {
                 refusal: "I cannot help with that.".to_string(),
@@ -3126,6 +3295,7 @@ mod tests {
         let output_items = vec![ResponseOutputItemInfo::Message {
             id: Some("msg_1".to_string()),
             status: Some("completed".to_string()),
+            phase: None,
             role: "assistant".to_string(),
             content: vec![ContentBlockPart::ReasoningText {
                 text: "thinking...".to_string(),
@@ -3165,6 +3335,7 @@ mod tests {
             ResponseOutputItemInfo::Message {
                 id: Some("msg_1".to_string()),
                 status: Some("completed".to_string()),
+                phase: None,
                 role: "assistant".to_string(),
                 content: vec![ContentBlockPart::ToolCall {
                     id: "call_\u{E0041}1".to_string(),
@@ -3212,6 +3383,7 @@ mod tests {
             ResponseOutputItemInfo::Message {
                 id: Some("msg_1".to_string()),
                 status: Some("completed".to_string()),
+                phase: None,
                 role: "assistant".to_string(),
                 content: vec![ContentBlockPart::ToolCall {
                     id: "call_1".to_string(),
@@ -3250,6 +3422,7 @@ mod tests {
             ResponseOutputItemInfo::Message {
                 id: Some("msg_1".to_string()),
                 status: Some("completed".to_string()),
+                phase: None,
                 role: "assistant".to_string(),
                 content: vec![ContentBlockPart::ToolCall {
                     id: "call_1".to_string(),

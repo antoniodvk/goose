@@ -1,5 +1,5 @@
 use crate::cache_semantics::{apply_chat_payload_breakpoints, CacheSemantics};
-use crate::conversation::message::{Message, MessageContentBlock};
+use crate::conversation::message::{Message, MessageContentBlock, RESPONSES_REPLAY_KEY};
 use crate::formats::anthropic::{
     adaptive_output_effort, model_supports_temperature, requires_explicit_thinking_disable,
     thinking_block_is_stale, thinking_budget_tokens, thinking_type_for_provider, ThinkingType,
@@ -205,7 +205,9 @@ fn format_messages(
 
                             if let Some(metadata) = &request.metadata {
                                 for (key, value) in metadata {
-                                    tool_call_json[key] = value.clone();
+                                    if key != RESPONSES_REPLAY_KEY {
+                                        tool_call_json[key] = value.clone();
+                                    }
                                 }
                             }
 
@@ -1860,6 +1862,31 @@ mod tests {
         assert!(!is_claude_model("gpt-4o"));
         assert!(!is_claude_model("gemini-2-5-flash"));
         assert!(!is_claude_model("databricks-meta-llama-3-3-70b"));
+    }
+
+    #[test]
+    fn responses_replay_does_not_reach_the_wire() -> anyhow::Result<()> {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("thoughtSignature".to_string(), json!("sig"));
+        metadata.insert(
+            RESPONSES_REPLAY_KEY.to_string(),
+            json!({ "phase": "commentary" }),
+        );
+
+        let message = Message::assistant().with_tool_request_with_metadata(
+            "tool1",
+            Ok(CallToolRequestParams::new("test_tool").with_arguments(object!({}))),
+            Some(&metadata),
+            None,
+        );
+
+        let spec = format_messages(&[message], &ImageFormat::OpenAi, None, false);
+        let as_value = serde_json::to_value(spec)?;
+        let tool_call = &as_value[0]["tool_calls"][0];
+        assert_eq!(tool_call["thoughtSignature"], "sig");
+        assert!(tool_call.get(RESPONSES_REPLAY_KEY).is_none());
+
+        Ok(())
     }
 
     #[test]
