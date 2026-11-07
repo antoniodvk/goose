@@ -268,8 +268,20 @@ impl Provider for NanoGptProvider {
         .map(Some)
     }
 
+    /// NanoGPT's own model list, else the NanoGPT catalog entry: the same
+    /// levels `stream` sends from (N485/N774).
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
-        self.reasoning_efforts.read().ok()?.get(model_name).cloned()
+        self.reasoning_efforts
+            .read()
+            .ok()
+            .and_then(|levels| levels.get(model_name).cloned())
+            .or_else(|| {
+                goose_providers::formats::openai::catalog_reasoning_efforts(
+                    NANOGPT_PROVIDER_NAME,
+                    model_name,
+                )
+                .filter(|levels| !levels.is_empty())
+            })
     }
 
     async fn stream(

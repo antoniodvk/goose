@@ -512,10 +512,10 @@ impl OpenAiProvider {
     /// supports) rather than sent as-is or omitted.
     fn meta_reasoning_effort(effort: ThinkingEffort) -> &'static str {
         match effort {
-            ThinkingEffort::Off | ThinkingEffort::Low => "low",
+            ThinkingEffort::Off | ThinkingEffort::Minimal | ThinkingEffort::Low => "low",
             ThinkingEffort::Medium => "medium",
             ThinkingEffort::High => "high",
-            ThinkingEffort::Max => "xhigh",
+            ThinkingEffort::XHigh | ThinkingEffort::Max => "xhigh",
         }
     }
 

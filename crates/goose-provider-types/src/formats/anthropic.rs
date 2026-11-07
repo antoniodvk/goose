@@ -781,8 +781,47 @@ pub fn thinking_effort(model_config: &ModelConfig) -> ThinkingEffort {
         .unwrap_or(ThinkingEffort::High)
 }
 
+/// The effort levels goose offers and sends for `model_name` (N774): an
+/// adaptive model's catalog levels as `output_config.effort`, plus `none` when
+/// Off turns thinking off (adaptive, not always-on). `None` keeps goose's
+/// budget-based levels for models without adaptive effort.
+pub fn declared_reasoning_efforts(provider_name: &str, model_name: &str) -> Option<Vec<String>> {
+    let canonical = maybe_get_canonical_model(provider_name, model_name)?;
+    if canonical.reasoning != Some(true) {
+        return None;
+    }
+    let mut levels = canonical
+        .reasoning_efforts
+        .filter(|levels| !levels.is_empty())?;
+    match canonical_thinking_mode(provider_name, model_name)? {
+        ThinkingMode::AlwaysOnAdaptive => {}
+        ThinkingMode::Adaptive => levels.insert(0, "none".to_string()),
+        ThinkingMode::Enabled => return None,
+    }
+    Some(levels)
+}
+
 fn adaptive_effort_wire(provider_name: &str, model_config: &ModelConfig) -> String {
-    let effort = adaptive_output_effort(model_config);
+    // The catalog's levels are what the model accepts and what the menu offers
+    // (N774): the chosen one is sent, the closest one for a stray value.
+    if let Some(level) =
+        super::openai::catalog_reasoning_efforts(provider_name, &model_config.model_name)
+            .filter(|levels| !levels.is_empty())
+            .and_then(|levels| {
+                super::openai::nearest_reasoning_effort(
+                    Some(&levels),
+                    &model_config.model_name,
+                    thinking_effort(model_config),
+                )
+            })
+    {
+        return level;
+    }
+    let effort = match adaptive_output_effort(model_config) {
+        // Anthropic's effort has no `minimal`; `low` is the closest level.
+        ThinkingEffort::Minimal => ThinkingEffort::Low,
+        effort => effort,
+    };
     // Meta Messages accepts low, medium, high, and xhigh. goose's max maps to xhigh.
     if provider_name == "muse_code" && effort == ThinkingEffort::Max {
         return "xhigh".to_string();
@@ -812,10 +851,12 @@ pub fn thinking_budget_tokens(model_config: &ModelConfig) -> i32 {
         .unwrap_or(ThinkingEffort::High);
     match effort {
         ThinkingEffort::Off => 1024,
-        ThinkingEffort::Low => 4000,
+        // goose has no budget of its own for minimal and xhigh: the nearest
+        // budgets apply, as when `xhigh` was read as max.
+        ThinkingEffort::Minimal | ThinkingEffort::Low => 4000,
         ThinkingEffort::Medium => 10000,
         ThinkingEffort::High => 16000,
-        ThinkingEffort::Max => 32000,
+        ThinkingEffort::XHigh | ThinkingEffort::Max => 32000,
     }
 }
 
@@ -1923,6 +1964,48 @@ mod tests {
 
         assert_eq!(payload["thinking"], json!({"type": "disabled"}));
 
+        Ok(())
+    }
+
+    /// N774: an adaptive model offers Off plus its catalog levels, an always-on
+    /// one only its levels, and each level is sent as itself.
+    #[test]
+    fn anthropic_menu_levels_are_the_levels_sent() -> Result<()> {
+        let _guard = env_lock::lock_env([("GOOSE_THINKING_EFFORT", None::<&str>)]);
+        let messages = vec![Message::user().with_text("Hello")];
+        for (model, expected) in [
+            (
+                "claude-opus-4-7",
+                vec!["none", "low", "medium", "high", "xhigh", "max"],
+            ),
+            (
+                "claude-opus-5-5",
+                vec!["low", "medium", "high", "xhigh", "max"],
+            ),
+        ] {
+            let declared = declared_reasoning_efforts(ANTHROPIC_PROVIDER_NAME, model).unwrap();
+            assert_eq!(declared, expected, "{model}");
+            for effort in super::super::openai::thinking_efforts_for_reasoning_efforts(&declared) {
+                let mut config = cfg(model).with_thinking_effort(effort);
+                config.max_tokens = Some(64_000);
+                let payload =
+                    create_request_with_default_options(&config, "system", &messages, &[])?;
+                if effort == ThinkingEffort::Off {
+                    assert_eq!(payload["thinking"], json!({"type": "disabled"}), "{model}");
+                } else {
+                    assert_eq!(
+                        payload["output_config"]["effort"],
+                        effort.reasoning_level(),
+                        "{model} {effort}"
+                    );
+                }
+            }
+        }
+        // Budget-based models keep goose's own levels.
+        assert_eq!(
+            declared_reasoning_efforts(ANTHROPIC_PROVIDER_NAME, "claude-sonnet-4-5"),
+            None
+        );
         Ok(())
     }
 

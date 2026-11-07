@@ -1928,29 +1928,41 @@ pub fn is_xai_reasoning_model(model_name: &str) -> bool {
         || model_name.starts_with("grok-4-1-fast-reasoning")
 }
 
-/// Maps Goose's effort levels to values accepted by xAI Chat Completions.
+/// The `reasoning_effort` levels xAI Chat Completions accepts for `model_name`
+/// (N774): the xAI catalog entry's, else the levels goose has always sent
+/// (grok-4.3 knows `none`, grok-3-mini has no `medium`, grok-4.6/4.7 `xhigh`).
+/// `Some(vec![])` for a model that reasons without an effort knob, `None` for
+/// a model that does not reason.
+pub fn xai_reasoning_efforts(model_name: &str) -> Option<Vec<String>> {
+    if !supports_xai_reasoning_effort(model_name) {
+        return is_xai_reasoning_model(model_name).then(Vec::new);
+    }
+    if let Some(levels) =
+        catalog_reasoning_efforts("xai", model_name).filter(|levels| !levels.is_empty())
+    {
+        return Some(levels);
+    }
+
+    let model_name = model_name.to_ascii_lowercase();
+    let levels: &[&str] = if model_name.starts_with("grok-4.3") {
+        &["none", "low", "medium", "high"]
+    } else if model_name.starts_with("grok-3-mini") {
+        &["low", "high"]
+    } else if model_name.starts_with("grok-4.7") || model_name.starts_with("grok-4.6") {
+        &["low", "medium", "high", "xhigh"]
+    } else {
+        &["low", "medium", "high"]
+    };
+    Some(levels.iter().map(|level| (*level).to_string()).collect())
+}
+
+/// The xAI level sent for `effort`: the closest of [`xai_reasoning_efforts`].
 pub fn xai_reasoning_effort_for_thinking(
     model_name: &str,
     effort: ThinkingEffort,
 ) -> Option<String> {
-    let model_name = model_name.to_ascii_lowercase();
-    let supports_none = model_name.starts_with("grok-4.3");
-    let supports_medium = !model_name.starts_with("grok-3-mini");
-
-    match effort {
-        ThinkingEffort::Off if supports_none => Some("none".to_string()),
-        ThinkingEffort::Off => Some("low".to_string()),
-        ThinkingEffort::Low => Some("low".to_string()),
-        ThinkingEffort::Medium if supports_medium => Some("medium".to_string()),
-        ThinkingEffort::Max
-            if model_name.starts_with("grok-4.7") || model_name.starts_with("grok-4.6") =>
-        {
-            Some("xhigh".to_string())
-        }
-        ThinkingEffort::Medium | ThinkingEffort::High | ThinkingEffort::Max => {
-            Some("high".to_string())
-        }
-    }
+    let levels = xai_reasoning_efforts(model_name)?;
+    nearest_reasoning_effort(Some(&levels), model_name, effort)
 }
 
 pub fn openai_reasoning_effort_for_thinking(
@@ -1979,53 +1991,35 @@ pub fn catalog_reasoning_efforts(provider: &str, model_name: &str) -> Option<Vec
 }
 
 /// The thinking efforts goose offers for a model whose accepted
-/// `reasoning_effort` levels are `declared` (N481). Several levels can map to
-/// one effort (`low`/`minimal`, `xhigh`/`max`), so each effort appears once.
+/// `reasoning_effort` levels are `declared` (N481): one effort per level
+/// (N774), ascending; unknown levels are skipped.
 pub fn thinking_efforts_for_reasoning_efforts(declared: &[String]) -> Vec<ThinkingEffort> {
-    [
-        ThinkingEffort::Off,
-        ThinkingEffort::Low,
-        ThinkingEffort::Medium,
-        ThinkingEffort::High,
-        ThinkingEffort::Max,
-    ]
-    .into_iter()
-    .filter(|effort| {
-        declared.iter().any(|level| match level.as_str() {
-            "none" => *effort == ThinkingEffort::Off,
-            "minimal" | "low" => *effort == ThinkingEffort::Low,
-            "medium" => *effort == ThinkingEffort::Medium,
-            "high" => *effort == ThinkingEffort::High,
-            "xhigh" | "max" => *effort == ThinkingEffort::Max,
-            _ => false,
+    ThinkingEffort::ALL
+        .into_iter()
+        .filter(|effort| {
+            declared
+                .iter()
+                .any(|level| level == effort.reasoning_level())
         })
-    })
-    .collect()
+        .collect()
 }
 
-/// The `offered` level closest to `effort`; without `offered`, the widely
-/// supported fallback levels for `model_name`.
+/// The `offered` level closest to `effort` (order: [`ThinkingEffort::fallback_order`]);
+/// without `offered`, the widely supported fallback levels for `model_name`.
 pub fn nearest_reasoning_effort(
     offered: Option<&[String]>,
     model_name: &str,
     effort: ThinkingEffort,
 ) -> Option<String> {
-    let catalog_efforts = offered;
-    let preferred: &[&str] = match effort {
-        ThinkingEffort::Off => &["none", "minimal", "low"],
-        ThinkingEffort::Low => &["low", "minimal", "medium", "high", "xhigh"],
-        ThinkingEffort::Medium => &["medium", "high", "low", "xhigh"],
-        ThinkingEffort::High => &["high", "medium", "xhigh", "low"],
-        ThinkingEffort::Max => &["max", "xhigh", "high", "medium", "low"],
-    };
-
-    preferred
+    effort
+        .fallback_order()
         .iter()
-        .find(|level| match catalog_efforts {
-            Some(values) => values.iter().any(|value| value == **level),
+        .map(|effort| effort.reasoning_level())
+        .find(|level| match offered {
+            Some(values) => values.iter().any(|value| value == level),
             None => openai_reasoning_efforts_for_model(model_name).contains(level),
         })
-        .map(|level| (*level).to_string())
+        .map(str::to_string)
 }
 
 pub(crate) fn openai_reasoning_efforts_for_model(_model_name: &str) -> &'static [&'static str] {
@@ -5831,10 +5825,78 @@ data: [DONE]"#;
             xai_reasoning_effort_for_thinking("grok-3-mini", ThinkingEffort::Medium),
             Some("high".to_string())
         );
+        // The catalog lists xhigh as grok-4.5's top level.
         assert_eq!(
             xai_reasoning_effort_for_thinking("grok-4.5", ThinkingEffort::Max),
-            Some("high".to_string())
+            Some("xhigh".to_string())
         );
+    }
+
+    /// N774: every level the menu offers for an xAI model is sent as itself.
+    #[test]
+    fn xai_menu_levels_are_the_levels_sent() {
+        for (model, expected) in [
+            ("grok-4.7", vec!["low", "medium", "high", "xhigh"]),
+            ("grok-4.3", vec!["none", "low", "medium", "high", "xhigh"]),
+        ] {
+            let declared = xai_reasoning_efforts(model).unwrap();
+            assert_eq!(declared, expected, "{model}");
+            for effort in thinking_efforts_for_reasoning_efforts(&declared) {
+                let config = ModelConfig::new(model)
+                    .with_canonical_limits("xai")
+                    .with_thinking_effort(effort);
+                let payload =
+                    create_request(&config, "system", &[], &[], &ImageFormat::OpenAi, false)
+                        .unwrap();
+                assert_eq!(
+                    payload.get("reasoning_effort"),
+                    Some(&json!(effort.reasoning_level())),
+                    "{model} {effort}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_declared_level_is_its_own_effort() {
+        let declared: Vec<String> = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+            .map(String::from)
+            .to_vec();
+        let efforts = thinking_efforts_for_reasoning_efforts(&declared);
+        assert_eq!(efforts, ThinkingEffort::ALL);
+        for effort in efforts {
+            assert_eq!(
+                nearest_reasoning_effort(Some(&declared), "m", effort).as_deref(),
+                Some(effort.reasoning_level())
+            );
+        }
+        assert_eq!(
+            nearest_reasoning_effort(
+                Some(&["low".to_string(), "high".to_string(), "xhigh".to_string()]),
+                "m",
+                ThinkingEffort::Max
+            )
+            .as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            nearest_reasoning_effort(
+                Some(&["minimal".to_string(), "low".to_string()]),
+                "m",
+                ThinkingEffort::Off
+            )
+            .as_deref(),
+            Some("minimal")
+        );
+    }
+
+    #[test]
+    fn xai_reasoning_models_without_an_effort_knob_declare_no_levels() {
+        assert_eq!(
+            xai_reasoning_efforts("grok-4.20-0309-reasoning"),
+            Some(Vec::new())
+        );
+        assert_eq!(xai_reasoning_efforts("grok-4.20-0309-non-reasoning"), None);
     }
 
     #[test]

@@ -371,6 +371,11 @@ impl Provider for AnthropicProvider {
         &self.name
     }
 
+    /// Adaptive models' catalog effort levels, which the request sends (N774).
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        crate::formats::anthropic::declared_reasoning_efforts(&self.name, model_name)
+    }
+
     async fn refresh_credentials(&self) -> Result<(), ProviderError> {
         self.api_client
             .refresh_credentials()

@@ -330,30 +330,16 @@ fn reasoning_effort_for_config(
     model_config: &ModelConfig,
     valid_levels: &[String],
 ) -> Option<String> {
-    use goose_providers::thinking::ThinkingEffort;
-
-    let supports = |level: &str| valid_levels.iter().any(|l| l == level);
+    // The menu offers exactly the catalog's levels (N774); a stray value gets
+    // the closest one, by the same order every provider uses.
     model_config
         .thinking_effort()
         .map(|effort| {
-            let preferred_levels: &[&str] = match effort {
-                ThinkingEffort::Off => {
-                    return Some(if supports("none") {
-                        "none".to_string()
-                    } else {
-                        "low".to_string()
-                    });
-                }
-                ThinkingEffort::Low => &["low", "medium", "high", "xhigh"],
-                ThinkingEffort::Medium => &["medium", "high", "low", "xhigh"],
-                ThinkingEffort::High => &["high", "medium", "xhigh", "low"],
-                ThinkingEffort::Max => &["xhigh", "high", "medium", "low"],
-            };
-
-            preferred_levels
-                .iter()
-                .find(|level| supports(level))
-                .map(|level| (*level).to_string())
+            goose_providers::formats::openai::nearest_reasoning_effort(
+                Some(valid_levels),
+                &model_config.model_name,
+                effort,
+            )
         })
         .unwrap_or_else(|| Some(get_reasoning_effort(&model_config.model_name, valid_levels)))
 }
@@ -1211,6 +1197,12 @@ impl Provider for ChatGptCodexProvider {
         true
     }
 
+    /// The Codex catalog's `supported_reasoning_levels`, which is what
+    /// `reasoning_effort_for_config` sends from (N774).
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        reasoning_levels_for_model(model_name)
+    }
+
     async fn stream(
         &self,
         model_config: &ModelConfig,
@@ -1634,6 +1626,32 @@ mod tests {
         .unwrap();
         assert_eq!(payload["reasoning"]["effort"], "none");
         assert!(payload.get("reasoning_effort").is_none());
+    }
+
+    /// N774: the menu offers the catalog's levels and each one is sent as itself,
+    /// for a model with `none` and one without.
+    #[test]
+    fn codex_menu_levels_are_the_levels_sent() {
+        for levels in [
+            vec!["none", "low", "medium", "high", "xhigh"],
+            vec!["low", "medium", "high", "xhigh"],
+        ] {
+            let levels: Vec<String> = levels.into_iter().map(String::from).collect();
+            let efforts =
+                goose_providers::formats::openai::thinking_efforts_for_reasoning_efforts(&levels);
+            let offered: Vec<&str> = efforts.iter().map(|e| e.reasoning_level()).collect();
+            assert_eq!(offered, levels);
+            for effort in efforts {
+                let config = ModelConfig::new("gpt-5.6-sol").with_thinking_effort(effort);
+                let payload =
+                    create_codex_request(&config, "sys", &[], &[], Some(&levels)).unwrap();
+                assert_eq!(
+                    payload["reasoning"]["effort"],
+                    effort.reasoning_level(),
+                    "{levels:?} {effort}"
+                );
+            }
+        }
     }
 
     // ChatGPT Codex does not support temperature and will return an error

@@ -397,7 +397,7 @@ impl ModelConfig {
             "low" => ThinkingEffort::Low,
             "medium" => ThinkingEffort::Medium,
             "high" => ThinkingEffort::High,
-            "xhigh" => ThinkingEffort::Max,
+            "xhigh" => ThinkingEffort::XHigh,
             _ => return,
         };
         self.model_name = parts[..parts.len() - 1].join("-");
@@ -734,7 +734,7 @@ mod tests {
             ]);
             let config = ModelConfig::new("gpt-5.4-xhigh");
             assert_eq!(config.model_name, "gpt-5.4");
-            assert_eq!(config.thinking_effort(), Some(ThinkingEffort::Max));
+            assert_eq!(config.thinking_effort(), Some(ThinkingEffort::XHigh));
         }
 
         #[test]
@@ -812,7 +812,11 @@ mod tests {
             );
             assert_eq!("med".parse::<ThinkingEffort>(), Ok(ThinkingEffort::Medium));
             assert_eq!("max".parse::<ThinkingEffort>(), Ok(ThinkingEffort::Max));
-            assert_eq!("xhigh".parse::<ThinkingEffort>(), Ok(ThinkingEffort::Max));
+            assert_eq!("xhigh".parse::<ThinkingEffort>(), Ok(ThinkingEffort::XHigh));
+            assert_eq!(
+                "minimal".parse::<ThinkingEffort>(),
+                Ok(ThinkingEffort::Minimal)
+            );
             assert!("invalid".parse::<ThinkingEffort>().is_err());
         }
     }

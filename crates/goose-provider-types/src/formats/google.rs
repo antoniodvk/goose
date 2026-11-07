@@ -642,10 +642,66 @@ fn is_gemini_3_or_newer(model_name: &str) -> bool {
     crate::model::gemini_generation(model_name).is_some_and(|generation| generation >= 3)
 }
 
+/// The `thinkingLevel` values goose offers and sends for a Gemini 3+ model
+/// (N774): the Google catalog entry's levels, else the levels goose has always
+/// sent (3.5/3.6 know `minimal`, 3-pro only `low`/`high`). No `none`: Gemini 3
+/// cannot turn thinking off, so Off is never a level of its own. `None` for
+/// other models, which keep the model-name based menu.
+pub fn gemini_reasoning_efforts(model_name: &str) -> Option<Vec<String>> {
+    if !is_gemini_3_or_newer(model_name) {
+        return None;
+    }
+    if let Some(levels) = super::openai::catalog_reasoning_efforts("google", model_name)
+        .filter(|levels| !levels.is_empty())
+    {
+        return Some(levels);
+    }
+    let lower = model_name.to_lowercase();
+    let levels: &[&str] = if lower.starts_with("gemini-3.5") || lower.starts_with("gemini-3.6") {
+        &["minimal", "low", "medium", "high"]
+    } else if lower.starts_with("gemini-3-pro") {
+        &["low", "high"]
+    } else {
+        &["low", "medium", "high"]
+    };
+    Some(levels.iter().map(|level| (*level).to_string()).collect())
+}
+
+fn gemini_thinking_level(level: &str) -> Option<ThinkingLevel> {
+    match level {
+        "minimal" => Some(ThinkingLevel::Minimal),
+        "low" => Some(ThinkingLevel::Low),
+        "medium" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        _ => None,
+    }
+}
+
 fn get_thinking_config(
     model_config: &ModelConfig,
     thinking_budget: Option<i32>,
 ) -> Option<ThinkingConfig> {
+    // Gemini 3+: the chosen level is one of the offered ones, a stray value
+    // (e.g. Off from the global default) the closest of them (N774).
+    if model_config.reasoning != Some(false) {
+        if let (Some(levels), Some(effort)) = (
+            gemini_reasoning_efforts(&model_config.model_name),
+            model_config.thinking_effort(),
+        ) {
+            let thinking_level = super::openai::nearest_reasoning_effort(
+                Some(&levels),
+                &model_config.model_name,
+                effort,
+            )
+            .and_then(|level| gemini_thinking_level(&level))?;
+            return Some(ThinkingConfig {
+                thinking_level: Some(thinking_level),
+                thinking_budget: None,
+                include_thoughts: effort != ThinkingEffort::Off,
+            });
+        }
+    }
+
     if model_config.reasoning == Some(false)
         || model_config.thinking_effort() == Some(ThinkingEffort::Off)
     {
@@ -680,24 +736,8 @@ fn get_thinking_config(
     }
 
     if is_gemini_3 {
-        let effort = model_config
-            .thinking_effort()
-            .unwrap_or(ThinkingEffort::Off);
-        if effort == ThinkingEffort::Off {
-            return None;
-        }
-        let thinking_level = match effort {
-            ThinkingEffort::Off | ThinkingEffort::Low => ThinkingLevel::Low,
-            ThinkingEffort::Medium if model_name.starts_with("gemini-3-pro") => ThinkingLevel::Low,
-            ThinkingEffort::Medium => ThinkingLevel::Medium,
-            ThinkingEffort::High | ThinkingEffort::Max => ThinkingLevel::High,
-        };
-
-        Some(ThinkingConfig {
-            thinking_level: Some(thinking_level),
-            thinking_budget: None,
-            include_thoughts: true,
-        })
+        // A chosen effort was handled above; without one the model's default applies.
+        None
     } else {
         let thinking_budget = match model_config
             .request_param::<i32>("thinking_budget")
@@ -1836,12 +1876,14 @@ data: [DONE]"#;
             Some(ThinkingLevel::Medium)
         ));
 
+        // Gemini 3 Pro has only low and high; a stray medium gets the closest,
+        // the higher on a tie, as for every provider (N774).
         let config =
             ModelConfig::new("gemini-3-pro-preview").with_thinking_effort(ThinkingEffort::Medium);
         let thinking_config = get_thinking_config(&config, None).unwrap();
         assert!(matches!(
             thinking_config.thinking_level,
-            Some(ThinkingLevel::Low)
+            Some(ThinkingLevel::High)
         ));
 
         // Test 2: Gemini 3 model with high thinking effort
@@ -1894,6 +1936,24 @@ data: [DONE]"#;
         let config = ModelConfig::new("gpt-4o");
         let result = get_thinking_config(&config, None);
         assert!(result.is_none());
+    }
+
+    /// N774: the menu offers Gemini's levels and each one is sent as itself;
+    /// Off is no level of its own (Gemini 3 cannot turn thinking off).
+    #[test]
+    fn gemini_menu_levels_are_the_levels_sent() {
+        let declared = gemini_reasoning_efforts("gemini-3.6-flash").unwrap();
+        assert_eq!(declared, ["minimal", "low", "medium", "high"]);
+        for effort in super::super::openai::thinking_efforts_for_reasoning_efforts(&declared) {
+            let config = ModelConfig::new("gemini-3.6-flash").with_thinking_effort(effort);
+            let payload = create_request(&config, "system", &[], &[]).unwrap();
+            assert_eq!(
+                payload["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                json!(effort.reasoning_level()),
+                "{effort}"
+            );
+        }
+        assert_eq!(gemini_reasoning_efforts("gemini-2.5-flash"), None);
     }
 
     #[test]

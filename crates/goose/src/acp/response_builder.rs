@@ -250,22 +250,31 @@ pub(super) async fn agent_thinking_effort_support(
 }
 
 /// A provider that leaves the menu to goose may still declare which
-/// `reasoning_effort` levels the model accepts (N481); then only those are offered.
+/// `reasoning_effort` levels the model accepts (N481); then only those are
+/// offered. An empty declaration is a model that reasons without an effort
+/// knob (N774), which offers nothing to choose.
 pub(super) fn thinking_effort_support_for_model(
     provider: &dyn goose_providers::base::Provider,
     model_name: &str,
 ) -> ThinkingEffortSupport {
     match provider.thinking_effort_support() {
-        ThinkingEffortSupport::Unspecified => provider
-            .declared_reasoning_efforts(model_name)
-            .map(|declared| {
-                goose_providers::formats::openai::thinking_efforts_for_reasoning_efforts(&declared)
-            })
-            .filter(|efforts| !efforts.is_empty())
-            .map_or(
-                ThinkingEffortSupport::Unspecified,
-                ThinkingEffortSupport::Declared,
-            ),
+        ThinkingEffortSupport::Unspecified => {
+            match provider.declared_reasoning_efforts(model_name) {
+                Some(declared) if declared.is_empty() => ThinkingEffortSupport::Unsupported,
+                Some(declared) => {
+                    let efforts =
+                        goose_providers::formats::openai::thinking_efforts_for_reasoning_efforts(
+                            &declared,
+                        );
+                    if efforts.is_empty() {
+                        ThinkingEffortSupport::Unspecified
+                    } else {
+                        ThinkingEffortSupport::Declared(efforts)
+                    }
+                }
+                None => ThinkingEffortSupport::Unspecified,
+            }
+        }
         other => other,
     }
 }
@@ -378,25 +387,20 @@ fn build_thinking_effort_choices(
                 .collect(),
             capability_thinking_effort_value(capability, model_config),
         ),
-        ThinkingEffortSupport::Declared(efforts) => {
-            let rank = |effort: &ThinkingEffort| match effort {
-                ThinkingEffort::Off => 0_i32,
-                ThinkingEffort::Low => 1,
-                ThinkingEffort::Medium => 2,
-                ThinkingEffort::High => 3,
-                ThinkingEffort::Max => 4,
-            };
+        ThinkingEffortSupport::Declared(declared) => {
+            // Each level once, ascending; the current one is the level the
+            // provider sends for the configured effort (same fallback order, N774).
+            let efforts: Vec<ThinkingEffort> = ThinkingEffort::ALL
+                .into_iter()
+                .filter(|effort| declared.contains(effort))
+                .collect();
             let configured = model_config
                 .thinking_effort()
                 .or_else(|| Config::global().get_goose_thinking_effort());
             let current = configured
-                .and_then(|configured| {
-                    efforts
-                        .iter()
-                        .min_by_key(|effort| (rank(effort) - rank(&configured)).abs())
-                })
-                .or_else(|| efforts.first())
-                .map(ToString::to_string)
+                .and_then(|configured| configured.nearest_in(&efforts))
+                .or_else(|| efforts.first().copied())
+                .map(|effort| effort.to_string())
                 .unwrap_or_default();
             (
                 efforts
@@ -473,9 +477,11 @@ fn current_thinking_effort_value(model_config: &ModelConfig) -> String {
         .or_else(|| Config::global().get_goose_thinking_effort());
     if model_config.is_glm_5_3_reasoning_model() || model_config.is_kimi_k3_reasoning_model() {
         return match configured {
-            Some(ThinkingEffort::Off | ThinkingEffort::Low) => ThinkingEffort::Low,
+            Some(ThinkingEffort::Off | ThinkingEffort::Minimal | ThinkingEffort::Low) => {
+                ThinkingEffort::Low
+            }
             Some(ThinkingEffort::Medium | ThinkingEffort::High) => ThinkingEffort::High,
-            Some(ThinkingEffort::Max) | None => ThinkingEffort::Max,
+            Some(ThinkingEffort::XHigh | ThinkingEffort::Max) | None => ThinkingEffort::Max,
         }
         .to_string();
     }
@@ -822,7 +828,24 @@ mod tests {
         );
         let values: Vec<String> = options.iter().map(|o| o.value.to_string()).collect();
         assert_eq!(values, ["low", "high", "max"]);
-        assert_eq!(current, "low");
+        // The level the provider sends for medium (`nearest_reasoning_effort`).
+        assert_eq!(current, "high");
+    }
+
+    /// N774: each declared level is one menu value, ascending, named as sent.
+    #[test]
+    fn declared_levels_are_menu_values_in_order() {
+        let declared = goose_providers::formats::openai::thinking_efforts_for_reasoning_efforts(
+            &["max", "none", "xhigh", "minimal", "low"].map(String::from),
+        );
+        let model_config = ModelConfig::new("m1").with_thinking_effort(ThinkingEffort::Max);
+        let (options, current) = build_thinking_effort_choices(
+            &model_config,
+            &ThinkingEffortSupport::Declared(declared),
+        );
+        let values: Vec<String> = options.iter().map(|o| o.value.to_string()).collect();
+        assert_eq!(values, ["off", "minimal", "low", "xhigh", "max"]);
+        assert_eq!(current, "max");
     }
 
     #[test]

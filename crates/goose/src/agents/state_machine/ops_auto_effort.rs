@@ -66,6 +66,9 @@ impl AutoEffortOperation {
                     ThinkingEffort::Off => {
                         "No reasoning is needed, such as a greeting or a direct factual response."
                     }
+                    ThinkingEffort::Minimal => {
+                        "Barely any reasoning is needed, such as a single obvious step."
+                    }
                     ThinkingEffort::Low => {
                         "A small amount of reasoning is enough for a simple, well-scoped task."
                     }
@@ -74,6 +77,9 @@ impl AutoEffortOperation {
                     }
                     ThinkingEffort::High => {
                         "The task is complex, ambiguous, or needs careful planning and verification."
+                    }
+                    ThinkingEffort::XHigh => {
+                        "The task is very difficult and needs extended reasoning beyond careful planning."
                     }
                     ThinkingEffort::Max => {
                         "The task is exceptionally difficult or high stakes and benefits from the deepest available reasoning."

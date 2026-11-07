@@ -564,6 +564,11 @@ impl Provider for OpenRouterProvider {
         true
     }
 
+    /// OpenRouter's catalog levels, which `apply_reasoning_config` sends from (N774).
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        openrouter_format::openrouter_reasoning_efforts(model_name)
+    }
+
     /// `GET /api/v1/key`: the limit of this key, if one is set.
     async fn fetch_usage(&self) -> Result<Option<AccountUsage>, ProviderError> {
         let response = self.api_client.request("api/v1/key").response_get().await?;
@@ -823,7 +828,9 @@ mod tests {
             None,
         );
 
-        let mut config = model_config("google/gemini-3.5-flash");
+        // The catalog lists `none`, so Off is sent as a disable; an endpoint that
+        // still insists on reasoning gets the retry at low (N485/N774).
+        let mut config = model_config("deepseek/deepseek-v4.1-flash");
         config.reasoning = Some(true);
         config.request_params = Some(HashMap::from([(
             "thinking_effort".to_string(),
@@ -1035,7 +1042,8 @@ mod tests {
             crate::canonical::maybe_get_canonical_model(OPENROUTER_PROVIDER_NAME, model)
                 .unwrap()
                 .limit
-                .context;
+                .context
+                .expect("the catalog lists a context limit for the base model");
         let response = wiremock::ResponseTemplate::new(200).set_body_json(json!({
             "data": [{ "id": model, "context_length": 64_000 }]
         }));

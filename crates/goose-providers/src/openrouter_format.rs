@@ -91,11 +91,19 @@ pub fn add_reasoning_details_to_request(payload: &mut Value, messages: &[Message
 fn reasoning_effort_for_openrouter(effort: ThinkingEffort) -> Option<&'static str> {
     match effort {
         ThinkingEffort::Off => None,
+        ThinkingEffort::Minimal => Some("minimal"),
         ThinkingEffort::Low => Some("low"),
         ThinkingEffort::Medium => Some("medium"),
         ThinkingEffort::High => Some("high"),
-        ThinkingEffort::Max => Some("xhigh"),
+        ThinkingEffort::XHigh | ThinkingEffort::Max => Some("xhigh"),
     }
+}
+
+/// The `reasoning.effort` levels OpenRouter's catalog lists for `model_name`;
+/// goose offers exactly these and sends the chosen one (N774). `None` without
+/// a catalog entry, which keeps the fixed mapping.
+pub fn openrouter_reasoning_efforts(model_name: &str) -> Option<Vec<String>> {
+    openai::catalog_reasoning_efforts("openrouter", model_name).filter(|levels| !levels.is_empty())
 }
 
 /// Returns true when a reasoning disable request was inserted, which
@@ -115,8 +123,26 @@ pub fn apply_reasoning_config(payload: &mut Value, model_config: &ModelConfig) -
         let clamped_effort = obj
             .remove("reasoning_effort")
             .and_then(|value| value.as_str().map(str::to_owned));
+        let model_name = &model_config.model_name;
+        let catalog_levels = openrouter_reasoning_efforts(model_name);
         if effort == ThinkingEffort::Off {
             if !model_config.is_reasoning_model() {
+                return false;
+            }
+            // OpenRouter's catalog decides, not the OpenAI clamp (N774): with `none`
+            // Off is a disable request, retried at low where the endpoint still
+            // insists on reasoning (N485); without `none` the menu does not offer
+            // Off and a stray Off gets the lowest level.
+            if let Some(levels) = &catalog_levels {
+                if levels.iter().any(|level| level == "none") {
+                    obj.insert("reasoning".to_string(), json!({ "enabled": false }));
+                    return true;
+                }
+                if let Some(level) =
+                    openai::nearest_reasoning_effort(Some(levels), model_name, effort)
+                {
+                    obj.insert("reasoning".to_string(), json!({ "effort": level }));
+                }
                 return false;
             }
             return match clamped_effort {
@@ -137,8 +163,7 @@ pub fn apply_reasoning_config(payload: &mut Value, model_config: &ModelConfig) -
         // The effort in the payload was clamped against the *OpenAI* catalog, which
         // knows neither `xhigh` nor `max` for other vendors' models. OpenRouter's own
         // catalog entry decides; without one, goose sends its fixed mapping (N485).
-        let model_name = &model_config.model_name;
-        let effort = match openai::catalog_reasoning_efforts("openrouter", model_name) {
+        let effort = match catalog_levels {
             Some(levels) => openai::nearest_reasoning_effort(Some(&levels), model_name, effort),
             None => reasoning_effort_for_openrouter(effort).map(str::to_owned),
         };
@@ -315,8 +340,10 @@ mod tests {
 
         let sent_disable = apply_reasoning_config(&mut payload, &model_config);
 
+        // OpenRouter's catalog lists no `none` for openai/gpt-5: Off gets its
+        // lowest level, minimal (N774).
         assert!(!sent_disable);
-        assert_eq!(payload["reasoning"], json!({ "effort": "low" }));
+        assert_eq!(payload["reasoning"], json!({ "effort": "minimal" }));
         assert!(payload.get("reasoning_effort").is_none());
     }
 
@@ -356,6 +383,54 @@ mod tests {
 
         assert!(payload.get("reasoning").is_none());
         assert!(payload.get("reasoning_effort").is_none());
+    }
+
+    /// N774: for a catalog model the menu offers exactly the catalog's levels
+    /// and each one is sent as itself, Off (`none`) as a disable request.
+    #[test]
+    fn openrouter_menu_levels_are_the_levels_sent() {
+        let model = "openai/gpt-6-sol";
+        let declared = openrouter_reasoning_efforts(model).unwrap();
+        assert_eq!(declared, ["none", "low", "medium", "high", "xhigh", "max"]);
+        for effort in openai::thinking_efforts_for_reasoning_efforts(&declared) {
+            let config = ModelConfig::new(model)
+                .with_canonical_limits("openrouter")
+                .with_thinking_effort(effort);
+            let mut payload = openai::create_request(
+                &config,
+                "system",
+                &[],
+                &[],
+                &crate::images::ImageFormat::OpenAi,
+                false,
+            )
+            .unwrap();
+            let sent_disable = apply_reasoning_config(&mut payload, &config);
+            let expected = if effort == ThinkingEffort::Off {
+                json!({ "enabled": false })
+            } else {
+                json!({ "effort": effort.reasoning_level() })
+            };
+            assert_eq!(sent_disable, effort == ThinkingEffort::Off, "{effort}");
+            assert_eq!(payload["reasoning"], expected, "{effort}");
+            assert!(payload.get("reasoning_effort").is_none());
+        }
+    }
+
+    #[test]
+    fn openrouter_model_without_catalog_levels_keeps_the_fixed_mapping() {
+        let model = "vendor/unlisted-reasoner";
+        assert_eq!(openrouter_reasoning_efforts(model), None);
+        for (effort, expected) in [
+            (ThinkingEffort::Off, json!({ "enabled": false })),
+            (ThinkingEffort::Max, json!({ "effort": "xhigh" })),
+        ] {
+            let mut config = ModelConfig::new(model).with_thinking_effort(effort);
+            config.reasoning = Some(true);
+            let mut payload = json!({ "model": model, "messages": [] });
+            apply_reasoning_config(&mut payload, &config);
+            assert_eq!(payload["reasoning"], expected, "{effort}");
+        }
     }
 
     #[test]

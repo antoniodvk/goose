@@ -179,6 +179,12 @@ impl Provider for OpenAiCompatibleProvider {
         &self.name
     }
 
+    /// xAI models get the levels `create_request` sends for them (N774); an
+    /// xAI model that reasons without an effort knob declares none.
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        crate::formats::openai::xai_reasoning_efforts(model_name)
+    }
+
     async fn refresh_credentials(&self) -> Result<(), ProviderError> {
         self.api_client
             .refresh_credentials()

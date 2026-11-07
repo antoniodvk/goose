@@ -68,12 +68,11 @@ pub(super) fn available_auto_efforts(
     model_config: &goose_providers::model::ModelConfig,
     support: ThinkingEffortSupport,
 ) -> Vec<ThinkingEffort> {
-    let applied_as_selected = |effort: &ThinkingEffort, applied: Option<String>| match effort {
-        ThinkingEffort::Off => applied.as_deref() == Some("none"),
-        ThinkingEffort::Low => applied.as_deref() == Some("low"),
-        ThinkingEffort::Medium => applied.as_deref() == Some("medium"),
-        ThinkingEffort::High => applied.as_deref() == Some("high"),
-        ThinkingEffort::Max => matches!(applied.as_deref(), Some("xhigh" | "max")),
+    // The automatic choice keeps its five steps; its top step stays the
+    // deepest level the model has, `xhigh` where there is no `max`.
+    let applied_as_selected = |effort: &ThinkingEffort, applied: Option<String>| {
+        applied.as_deref() == Some(effort.reasoning_level())
+            || (*effort == ThinkingEffort::Max && applied.as_deref() == Some("xhigh"))
     };
 
     match support {

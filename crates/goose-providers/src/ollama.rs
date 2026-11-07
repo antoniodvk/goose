@@ -205,9 +205,10 @@ impl OllamaProvider {
     async fn reasoning_effort(&self, model_config: &ModelConfig) -> Option<&'static str> {
         let level = match model_config.thinking_effort()? {
             ThinkingEffort::Off => return Some("none"),
-            ThinkingEffort::Low => "low",
+            // Ollama's `think` levels are low, medium and high: the nearest one.
+            ThinkingEffort::Minimal | ThinkingEffort::Low => "low",
             ThinkingEffort::Medium => "medium",
-            ThinkingEffort::High | ThinkingEffort::Max => "high",
+            ThinkingEffort::High | ThinkingEffort::XHigh | ThinkingEffort::Max => "high",
         };
         let supports_thinking = match self.model_capabilities(&model_config.model_name).await {
             Some(capabilities) => capabilities.thinking,

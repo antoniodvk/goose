@@ -2319,8 +2319,9 @@ mod tests {
 
         let result = create_responses_request(&model_config, "You are helpful.", &[], &[]).unwrap();
 
+        // The suffix names xhigh, which is its own level since N774.
         assert_eq!(result["model"], "gpt-5.6-sol");
-        assert_eq!(result["reasoning"]["effort"], "max");
+        assert_eq!(result["reasoning"]["effort"], "xhigh");
         assert_eq!(result["reasoning"]["summary"], "auto");
     }
 

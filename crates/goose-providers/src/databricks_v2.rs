@@ -272,9 +272,9 @@ impl DatabricksV2Provider {
         }
 
         Some(match model_config.thinking_effort() {
-            Some(ThinkingEffort::Off | ThinkingEffort::Low) => "low",
+            Some(ThinkingEffort::Off | ThinkingEffort::Minimal | ThinkingEffort::Low) => "low",
             Some(ThinkingEffort::Medium | ThinkingEffort::High) => "high",
-            Some(ThinkingEffort::Max) | None => "max",
+            Some(ThinkingEffort::XHigh | ThinkingEffort::Max) | None => "max",
         })
     }
 

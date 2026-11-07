@@ -306,10 +306,73 @@ fn contains_unquoted_gt(text: &str) -> bool {
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingEffort {
     Off,
+    Minimal,
     Low,
     Medium,
     High,
+    XHigh,
     Max,
+}
+
+impl ThinkingEffort {
+    /// Every effort in ascending order.
+    pub const ALL: [ThinkingEffort; 7] = [
+        Self::Off,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
+    /// The `reasoning_effort` wire level this effort stands for (N774):
+    /// each effort is exactly one level, `Off` is `none`.
+    pub fn reasoning_level(self) -> &'static str {
+        match self {
+            Self::Off => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// The levels tried, closest first, when a model does not accept `self`
+    /// (the order of N481; `Minimal` and `XHigh` since N774).
+    pub fn fallback_order(self) -> &'static [ThinkingEffort] {
+        match self {
+            Self::Off => &[Self::Off, Self::Minimal, Self::Low],
+            Self::Minimal => &[
+                Self::Minimal,
+                Self::Low,
+                Self::Medium,
+                Self::High,
+                Self::XHigh,
+            ],
+            Self::Low => &[
+                Self::Low,
+                Self::Minimal,
+                Self::Medium,
+                Self::High,
+                Self::XHigh,
+            ],
+            Self::Medium => &[Self::Medium, Self::High, Self::Low, Self::XHigh],
+            Self::High => &[Self::High, Self::Medium, Self::XHigh, Self::Low],
+            Self::XHigh => &[Self::XHigh, Self::Max, Self::High, Self::Medium, Self::Low],
+            Self::Max => &[Self::Max, Self::XHigh, Self::High, Self::Medium, Self::Low],
+        }
+    }
+
+    /// The `offered` effort that is sent when `self` is chosen.
+    pub fn nearest_in(self, offered: &[ThinkingEffort]) -> Option<ThinkingEffort> {
+        self.fallback_order()
+            .iter()
+            .copied()
+            .find(|effort| offered.contains(effort))
+    }
 }
 
 impl FromStr for ThinkingEffort {
@@ -317,10 +380,12 @@ impl FromStr for ThinkingEffort {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "off" | "disabled" | "none" => Ok(Self::Off),
+            "minimal" => Ok(Self::Minimal),
             "low" => Ok(Self::Low),
             "medium" | "med" => Ok(Self::Medium),
             "high" => Ok(Self::High),
-            "max" | "xhigh" => Ok(Self::Max),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
             other => Err(format!("unknown thinking effort: '{other}'")),
         }
     }
@@ -330,10 +395,7 @@ impl fmt::Display for ThinkingEffort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Off => write!(f, "off"),
-            Self::Low => write!(f, "low"),
-            Self::Medium => write!(f, "medium"),
-            Self::High => write!(f, "high"),
-            Self::Max => write!(f, "max"),
+            other => write!(f, "{}", other.reasoning_level()),
         }
     }
 }

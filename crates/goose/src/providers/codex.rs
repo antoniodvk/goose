@@ -63,7 +63,7 @@ impl CodexProvider {
                 "low" => Some(ThinkingEffort::Low),
                 "medium" => Some(ThinkingEffort::Medium),
                 "high" => Some(ThinkingEffort::High),
-                "xhigh" => Some(ThinkingEffort::Max),
+                "xhigh" => Some(ThinkingEffort::XHigh),
                 _ => None,
             })
     }
@@ -75,10 +75,12 @@ impl CodexProvider {
             .unwrap_or(ThinkingEffort::High)
         {
             ThinkingEffort::Off => Some("none".to_string()),
-            ThinkingEffort::Low => Some("low".to_string()),
+            // goose sends the Codex CLI only none, low, medium, high and xhigh;
+            // minimal and max get the nearest of these.
+            ThinkingEffort::Minimal | ThinkingEffort::Low => Some("low".to_string()),
             ThinkingEffort::Medium => Some("medium".to_string()),
             ThinkingEffort::High => Some("high".to_string()),
-            ThinkingEffort::Max => Some("xhigh".to_string()),
+            ThinkingEffort::XHigh | ThinkingEffort::Max => Some("xhigh".to_string()),
         }
     }
 
