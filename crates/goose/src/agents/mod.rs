@@ -28,6 +28,7 @@ mod tool_confirmation_coordinator;
 pub mod tool_execution;
 mod tool_schema_normalize;
 pub mod tool_search;
+pub mod tool_texts;
 pub mod types;
 pub mod validate_extensions;
 

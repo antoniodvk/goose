@@ -139,7 +139,7 @@ pub(crate) fn tool() -> Tool {
         .as_object()
         .cloned()
         .expect("tool_search schema is an object");
-    Tool::new(
+    let mut tool = Tool::new(
         TOOL_SEARCH_TOOL_NAME,
         "Loads deferred tools so they can be called.\n\n\
          Deferred tools are listed by name in the system prompt under \"Deferred tools\". Until a \
@@ -159,7 +159,9 @@ pub(crate) fn tool() -> Tool {
         Some(false),
         Some(true),
         Some(false),
-    ))
+    ));
+    crate::agents::tool_texts::apply(&mut tool);
+    tool
 }
 
 /// The system prompt section that names the deferred tools.
