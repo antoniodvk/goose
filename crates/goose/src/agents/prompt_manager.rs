@@ -50,18 +50,75 @@ pub struct SystemPromptBuilder<'a, M> {
     goose_mode: Option<GooseMode>,
 }
 
-/// Claude models that goose drives itself (Anthropic API, OpenRouter, any other provider) get the
-/// working rules of Claude Code instead of the generic base prompt (A48). Agent providers such as
-/// claude-acp run Claude Code's own prompt and ignore goose's.
+/// Every model family gets the base prompt its maker wrote for agentic work by default: Claude
+/// models the working rules of Claude Code (A48), OpenAI GPT models OpenAI's Codex instructions
+/// (C214), all others goose's own. Agent providers such as claude-acp run their own prompt and
+/// ignore goose's. `GOOSE_BASE_PROMPT_CLAUDE`, `GOOSE_BASE_PROMPT_OPENAI` and
+/// `GOOSE_BASE_PROMPT_OTHER` (`goose`, `openai` or `claude`) choose another base prompt per family.
 fn base_template_for(session: &Session) -> &'static str {
-    let is_claude = session
+    let model_name = session
         .model_config
         .as_ref()
-        .is_some_and(|model| model.model_name.to_ascii_lowercase().contains("claude"));
-    if is_claude {
-        "claude_system.md"
+        .map(|model| model.model_name.as_str())
+        .unwrap_or_default();
+    let choice = Config::global()
+        .get_param::<String>(family_of(model_name).config_key())
+        .ok();
+    template_for(model_name, choice.as_deref())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFamily {
+    Claude,
+    OpenAi,
+    Other,
+}
+
+impl ModelFamily {
+    fn config_key(self) -> &'static str {
+        match self {
+            ModelFamily::Claude => "GOOSE_BASE_PROMPT_CLAUDE",
+            ModelFamily::OpenAi => "GOOSE_BASE_PROMPT_OPENAI",
+            ModelFamily::Other => "GOOSE_BASE_PROMPT_OTHER",
+        }
+    }
+
+    fn default_template(self) -> &'static str {
+        match self {
+            ModelFamily::Claude => "claude_system.md",
+            ModelFamily::OpenAi => "openai_system.md",
+            ModelFamily::Other => "system.md",
+        }
+    }
+}
+
+/// OpenAI's GPT models under any provider (`gpt-6.1-terra`, `openai/gpt-6.1-sol`); the open-weight
+/// gpt-oss models are not what OpenAI's Codex instructions are written for.
+fn family_of(model_name: &str) -> ModelFamily {
+    let name = model_name.to_ascii_lowercase();
+    if name.contains("claude") {
+        ModelFamily::Claude
+    } else if name.contains("gpt-") && !name.contains("gpt-oss") {
+        ModelFamily::OpenAi
     } else {
-        "system.md"
+        ModelFamily::Other
+    }
+}
+
+fn template_for(model_name: &str, choice: Option<&str>) -> &'static str {
+    let family = family_of(model_name);
+    match choice.map(str::trim) {
+        Some("goose") => "system.md",
+        Some("openai") => "openai_system.md",
+        Some("claude") => "claude_system.md",
+        Some(other) => {
+            tracing::warn!(
+                "{} has unknown value {other:?}, using the default base prompt",
+                family.config_key()
+            );
+            family.default_template()
+        }
+        None => family.default_template(),
     }
 }
 
@@ -300,6 +357,51 @@ mod tests {
         overridden.system_prompt_override = Some("CUSTOM".to_string());
         let custom = manager.builder().with_session(&overridden).build().unwrap();
         assert_eq!(custom, "CUSTOM");
+    }
+
+    #[test]
+    fn each_family_gets_its_makers_base_prompt_unless_chosen_otherwise() {
+        assert_eq!(template_for("gpt-6.1-terra", None), "openai_system.md");
+        assert_eq!(template_for("openai/gpt-6.1-sol", None), "openai_system.md");
+        assert_eq!(template_for("openai/gpt-oss-120b", None), "system.md");
+        assert_eq!(template_for("claude-opus-5-5", None), "claude_system.md");
+        assert_eq!(template_for("grok-4.7", None), "system.md");
+
+        assert_eq!(template_for("gpt-6.1-terra", Some("goose")), "system.md");
+        assert_eq!(template_for("grok-4.7", Some("openai")), "openai_system.md");
+        assert_eq!(
+            template_for("gpt-6.1-terra", Some("claude")),
+            "claude_system.md"
+        );
+        assert_eq!(
+            template_for("gpt-6.1-terra", Some("bogus")),
+            "openai_system.md"
+        );
+    }
+
+    #[test]
+    fn openai_base_prompt_renders_with_goose_blocks_and_tools() {
+        let manager = PromptManager::with_timestamp(DateTime::<Utc>::from_timestamp(0, 0).unwrap());
+        let mut builder = manager.builder();
+        builder.base_template = "openai_system.md";
+        let prompt = builder.build().unwrap();
+
+        assert!(prompt.starts_with("You are goose, an agent based on an OpenAI GPT model"));
+        assert!(prompt.contains("# Autonomy and persistence"));
+        assert!(prompt.contains("# Turn Context"));
+        assert!(prompt.contains("`load_skill`"));
+        for codex_only in [
+            "Codex",
+            "functions.exec",
+            "request_user_input",
+            "apply_patch",
+            "Apache License",
+        ] {
+            assert!(
+                !prompt.contains(codex_only),
+                "{codex_only} must not reach the model"
+            );
+        }
     }
 
     #[test]
