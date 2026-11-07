@@ -130,6 +130,73 @@ fn one_shot_model_config(model_config: ModelConfig) -> ModelConfig {
         .with_prompt_cache_disabled()
 }
 
+/// Smallest output budget the fitting leaves a request, so a nearly full
+/// context still gets room for a short answer instead of a zero budget.
+const MIN_FITTED_OUTPUT_TOKENS: i32 = 4_096;
+
+/// The output budget that still fits next to the input in the context window.
+///
+/// Providers reject a request whose input plus `max_tokens` exceeds the
+/// context window (OpenRouter: "maximum context length is N tokens ... in the
+/// output"). The canonical output limit of many models is close to their
+/// window (e.g. 943_718 of 1_048_576), so a fixed `max_tokens` breaks every
+/// request once the conversation passes the small remainder. The local
+/// tokenizer is not the provider's, so the input estimate is padded by a
+/// quarter plus a fixed reserve before it is subtracted.
+fn fitted_max_tokens(max_tokens: i32, context_limit: usize, input_estimate: usize) -> i32 {
+    let reserved = input_estimate
+        .saturating_add(input_estimate / 4)
+        .saturating_add(1_024);
+    let room = i32::try_from(context_limit.saturating_sub(reserved)).unwrap_or(i32::MAX);
+    if max_tokens <= room {
+        return max_tokens;
+    }
+    room.max(MIN_FITTED_OUTPUT_TOKENS).min(max_tokens)
+}
+
+/// Lower `max_tokens` to what fits next to this request's input. Leaves the
+/// config unchanged when no output limit is set or the context limit is
+/// unknown (a guessed limit must not shrink the budget).
+pub async fn fit_max_tokens_to_context(
+    provider: &dyn Provider,
+    model_config: ModelConfig,
+    system: &str,
+    messages: &[Message],
+    tools: &[Tool],
+) -> ModelConfig {
+    let Some(max_tokens) = model_config.max_tokens else {
+        return model_config;
+    };
+    let override_limit = model_config
+        .context_limit
+        .or_else(|| Config::global().get_goose_context_limit().ok().flatten());
+    let Some(context_limit) = provider
+        .get_known_context_limit(&model_config.model_name, override_limit)
+        .await
+    else {
+        return model_config;
+    };
+    let input_estimate = match crate::token_counter::create_token_counter().await {
+        Ok(counter) => counter.count_chat_tokens(system, messages, tools),
+        Err(error) => {
+            tracing::warn!("Failed to create token counter for max_tokens fitting: {error}");
+            return model_config;
+        }
+    };
+    let fitted = fitted_max_tokens(max_tokens, context_limit, input_estimate);
+    if fitted == max_tokens {
+        return model_config;
+    }
+    tracing::debug!(
+        max_tokens,
+        fitted,
+        context_limit,
+        input_estimate,
+        "max_tokens lowered to fit the context window"
+    );
+    model_config.with_max_tokens(Some(fitted))
+}
+
 /// Run a completion for a one-shot auxiliary task on the main session model.
 /// Thinking is disabled and prompt-cache writes are skipped because this prompt
 /// will not recur.
@@ -141,7 +208,14 @@ pub async fn complete_one_shot(
     messages: &[Message],
     tools: &[Tool],
 ) -> Result<(Message, ProviderUsage), ProviderError> {
-    let one_shot_model_config = one_shot_model_config(model_config.clone());
+    let one_shot_model_config = fit_max_tokens_to_context(
+        provider,
+        one_shot_model_config(model_config.clone()),
+        system,
+        messages,
+        tools,
+    )
+    .await;
 
     crate::session_context::with_session_id(
         Some(session_id.to_string()),
@@ -418,5 +492,31 @@ mod canonical_vision_tests {
         let model = apply_canonical_limits("my-custom-provider", ModelConfig::new("some-model"));
 
         assert_eq!(model.supports_vision, None);
+    }
+
+    #[test]
+    fn fitted_max_tokens_keeps_a_budget_that_fits() {
+        assert_eq!(
+            super::fitted_max_tokens(128_000, 1_048_576, 106_000),
+            128_000
+        );
+    }
+
+    #[test]
+    fn fitted_max_tokens_shrinks_an_output_limit_near_the_window() {
+        // The case Toni hit: canonical output 943_718 of a 1_048_576 window
+        // with about 106_000 tokens of input.
+        let fitted = super::fitted_max_tokens(943_718, 1_048_576, 106_000);
+        assert!(fitted < 943_718);
+        assert!(106_000 + fitted as usize <= 1_048_576);
+    }
+
+    #[test]
+    fn fitted_max_tokens_leaves_a_minimum_when_the_window_is_full() {
+        assert_eq!(
+            super::fitted_max_tokens(943_718, 1_048_576, 1_000_000),
+            super::MIN_FITTED_OUTPUT_TOKENS
+        );
+        assert_eq!(super::fitted_max_tokens(2_000, 1_048_576, 1_000_000), 2_000);
     }
 }
