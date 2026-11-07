@@ -433,6 +433,19 @@ fn build_thinking_effort_choices(
     }
 }
 
+/// The values of the `thinking_effort` select a new session with this model
+/// shows, for clients that ask before opening one (N784).
+pub(super) fn thinking_effort_menu_values(
+    model_config: &ModelConfig,
+    effort_support: &ThinkingEffortSupport,
+) -> Vec<String> {
+    build_thinking_effort_choices(model_config, effort_support)
+        .0
+        .into_iter()
+        .map(|option| option.value.to_string())
+        .collect()
+}
+
 /// The goose-side value that will actually be sent wins — `resolve_effort_value`
 /// is shared with the provider's send path — then whatever the agent currently
 /// has, which is what it keeps when goose sends nothing.
@@ -846,6 +859,27 @@ mod tests {
         let values: Vec<String> = options.iter().map(|o| o.value.to_string()).collect();
         assert_eq!(values, ["off", "minimal", "low", "xhigh", "max"]);
         assert_eq!(current, "max");
+    }
+
+    /// N784: the levels asked for before a session are the session menu's.
+    #[test]
+    fn menu_values_without_session_match_session_menu() {
+        let declared = goose_providers::formats::openai::thinking_efforts_for_reasoning_efforts(
+            &["low", "medium", "high", "xhigh"].map(String::from),
+        );
+        let model_config = ModelConfig::new("grok-4.7");
+        let support = ThinkingEffortSupport::Declared(declared);
+        let (options, _) = build_thinking_effort_choices(&model_config, &support);
+        let session: Vec<String> = options.iter().map(|o| o.value.to_string()).collect();
+        assert_eq!(
+            thinking_effort_menu_values(&model_config, &support),
+            session
+        );
+        assert_eq!(session, ["low", "medium", "high", "xhigh"]);
+        assert_eq!(
+            thinking_effort_menu_values(&model_config, &ThinkingEffortSupport::Unsupported),
+            ["off"]
+        );
     }
 
     #[test]

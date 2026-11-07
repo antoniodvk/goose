@@ -574,6 +574,50 @@ impl GooseAcpAgent {
         })
     }
 
+    pub(super) async fn on_list_provider_thinking_efforts(
+        &self,
+        req: ProviderThinkingEffortsListRequest,
+    ) -> Result<ProviderThinkingEffortsListResponse, agent_client_protocol::Error> {
+        // An agent provider only knows its levels once the agent runs; asking
+        // here must never start it (Claude Code, Codex).
+        let entry = self
+            .provider_inventory
+            .find_entry_for_provider(&req.provider_id)
+            .await;
+        match entry {
+            None => {
+                return Err(agent_client_protocol::Error::invalid_params()
+                    .data(format!("Unknown provider: {}", req.provider_id)))
+            }
+            Some(entry) if entry.acp => {
+                return Err(agent_client_protocol::Error::invalid_params().data(format!(
+                    "Agent provider reports its levels only in a session: {}",
+                    req.provider_id
+                )))
+            }
+            Some(_) => {}
+        }
+        let model_config =
+            crate::model_config::model_config_from_user_config_with_session_settings(
+                &req.provider_id,
+                &req.model_id,
+                None,
+                None,
+                None,
+            )
+            .invalid_params_err_ctx("Invalid model config")?;
+        let provider = self
+            .create_provider(&req.provider_id)
+            .await
+            .internal_err_ctx("Failed to initialize provider")?;
+        let support = thinking_effort_support_for_model(provider.as_ref(), &req.model_id);
+        Ok(ProviderThinkingEffortsListResponse {
+            efforts: thinking_effort_menu_values(&model_config, &support),
+            provider_id: req.provider_id,
+            model_id: req.model_id,
+        })
+    }
+
     pub(super) async fn on_provider_usage(
         &self,
         req: ProviderUsageRequest,

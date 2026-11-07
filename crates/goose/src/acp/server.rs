@@ -4,7 +4,7 @@ pub(super) use crate::acp::response_builder::{
     agent_thinking_effort_support, build_config_options, build_mode_state, build_model_state,
     build_provider_options, build_session_info, build_session_setup_config,
     send_session_setup_notifications, session_meta, session_provider_selection,
-    session_response_meta, should_refresh_inventory_for_session_init,
+    session_response_meta, should_refresh_inventory_for_session_init, thinking_effort_menu_values,
     thinking_effort_support_for_model,
 };
 use crate::acp::tool_call_notifier::ToolCallNotifier;

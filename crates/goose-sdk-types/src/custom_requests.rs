@@ -1743,6 +1743,29 @@ pub struct ProviderSupportedModelsListResponse {
     pub models: Vec<String>,
 }
 
+/// The thinking-effort levels a new session with this model would offer, in
+/// menu order, without opening a session (N784). Agent providers (ACP
+/// entries) are refused: answering would start the agent.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
+#[request(
+    method = "_goose/unstable/providers/thinking-efforts/list",
+    response = ProviderThinkingEffortsListResponse
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderThinkingEffortsListRequest {
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderThinkingEffortsListResponse {
+    pub provider_id: String,
+    pub model_id: String,
+    /// Same values as the `thinking_effort` select of a new session.
+    pub efforts: Vec<String>,
+}
+
 /// Read the plan windows and balances of the provider's account from the
 /// provider's own account API. `usage` is null for providers without one.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]

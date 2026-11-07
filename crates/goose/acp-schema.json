@@ -1994,6 +1994,49 @@
       "x-side": "agent",
       "x-method": "_goose/unstable/providers/supported-models/list"
     },
+    "ProviderThinkingEffortsListRequest_unstable": {
+      "type": "object",
+      "properties": {
+        "providerId": {
+          "type": "string"
+        },
+        "modelId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId",
+        "modelId"
+      ],
+      "description": "The thinking-effort levels a new session with this model would offer, in\nmenu order, without opening a session (N784). Agent providers (ACP\nentries) are refused: answering would start the agent.",
+      "x-side": "agent",
+      "x-method": "_goose/unstable/providers/thinking-efforts/list"
+    },
+    "ProviderThinkingEffortsListResponse_unstable": {
+      "type": "object",
+      "properties": {
+        "providerId": {
+          "type": "string"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "efforts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Same values as the `thinking_effort` select of a new session."
+        }
+      },
+      "required": [
+        "providerId",
+        "modelId",
+        "efforts"
+      ],
+      "x-side": "agent",
+      "x-method": "_goose/unstable/providers/thinking-efforts/list"
+    },
     "ProviderUsageRequest_unstable": {
       "type": "object",
       "properties": {
@@ -7559,6 +7602,15 @@
                 {
                   "allOf": [
                     {
+                      "$ref": "#/$defs/ProviderThinkingEffortsListRequest_unstable"
+                    }
+                  ],
+                  "description": "Params for _goose/unstable/providers/thinking-efforts/list",
+                  "title": "ProviderThinkingEffortsListRequest_unstable"
+                },
+                {
+                  "allOf": [
+                    {
                       "$ref": "#/$defs/ProviderUsageRequest_unstable"
                     }
                   ],
@@ -8501,6 +8553,14 @@
                         }
                       ],
                       "title": "ProviderSupportedModelsListResponse_unstable"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/$defs/ProviderThinkingEffortsListResponse_unstable"
+                        }
+                      ],
+                      "title": "ProviderThinkingEffortsListResponse_unstable"
                     },
                     {
                       "allOf": [
