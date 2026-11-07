@@ -5,6 +5,7 @@ use crate::providers::base::{
     ConfigKey, MessageStream, Provider, ProviderDef, ProviderMetadata,
     DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_PROVIDER_TIMEOUT_SECS,
 };
+use crate::providers::codex_trace::{offers_tools, record_response_end, ResponseEnd};
 use crate::providers::openai_compatible::handle_status;
 use crate::providers::private_file::write_private_file;
 use crate::providers::retry::ProviderRetry;
@@ -19,6 +20,7 @@ use futures::{StreamExt, TryStreamExt};
 use goose_providers::errors::ProviderError;
 use goose_providers::formats::openai_responses::responses_api_to_streaming_message;
 use goose_providers::model::ModelConfig;
+use goose_providers::request_log::{start_log, LoggerHandleExt};
 use goose_providers::usage::{parse_chatgpt_usage, AccountUsage};
 use rmcp::model::{ContentBlock, Role, Tool};
 use serde::{Deserialize, Serialize};
@@ -36,7 +38,7 @@ use tokio_util::io::StreamReader;
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ISSUER: &str = "https://auth.openai.com";
-const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex";
+pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex";
 const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 // openai/codex `backend-client`: `PathStyle::ChatGptApi` => `{base_url}/wham/usage`.
 const CHATGPT_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -1227,31 +1229,57 @@ impl Provider for ChatGptCodexProvider {
         .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
         payload["stream"] = serde_json::Value::Bool(true);
 
+        // The trace only watches: a failed write must not reach the chat.
+        let mut log = start_log(model_config, &payload).unwrap_or_else(|error| {
+            tracing::warn!("Codex request not logged: {error}");
+            None
+        });
+        let session_id = crate::session_context::current_session_id();
+
         let response = self
             .with_retry(|| async {
                 let payload_clone = payload.clone();
                 self.post_streaming(&payload_clone).await
             })
-            .await?;
+            .await
+            .inspect_err(|error| {
+                let _ = log.error(error);
+            })?;
 
         let stream = response.bytes_stream().map_err(io::Error::other);
         let model_name = model_config.model_name.clone();
+        let response_end = Arc::new(std::sync::Mutex::new(ResponseEnd::default()));
 
         Ok(Box::pin(try_stream! {
             let stream_reader = StreamReader::new(stream);
-            let framed = FramedRead::new(stream_reader, LinesCodec::new()).map_err(anyhow::Error::from);
+            let watched_end = Arc::clone(&response_end);
+            let framed = FramedRead::new(stream_reader, LinesCodec::new())
+                .inspect_ok(move |line| {
+                    if let Ok(mut end) = watched_end.lock() {
+                        end.observe(line);
+                    }
+                })
+                .map_err(anyhow::Error::from);
 
             let message_stream = responses_api_to_streaming_message(framed);
             pin!(message_stream);
             while let Some(message) = message_stream.next().await {
                 let (mut message, usage) = message.map_err(|e| {
+                    let _ = log.error(&e);
                     e.downcast::<ProviderError>()
                         .unwrap_or_else(ProviderError::stream_decode_error)
                 })?;
                 if let Some(message) = &mut message {
                     stamp_replay_model(message, &model_name);
                 }
+                let _ = log.write(&message, usage.as_ref().map(|usage| &usage.usage));
                 yield (message, usage);
+            }
+
+            if let Ok(end) = response_end.lock() {
+                let summary = end.summary(session_id.as_deref(), &model_name, offers_tools(&payload));
+                let _ = log.write(&json!({ "codex_response_end": summary }), None);
+                record_response_end(session_id.as_deref(), &model_name, &payload, &end);
             }
         }))
     }

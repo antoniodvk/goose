@@ -16,6 +16,10 @@ name = "goose"
 path = "src/main.rs"
 
 [[bin]]
+name = "codex-replay"
+path = "src/bin/codex_replay.rs"
+
+[[bin]]
 name = "generate_manpages"
 path = "src/bin/generate_manpages.rs"
 
