@@ -13,7 +13,7 @@ static TEMPLATE_REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "claude_system.md",
-        "Main system prompt for Claude models goose drives itself, with Claude Code's working rules",
+        "Main system prompt for Claude and all models outside the OpenAI GPT family, with Claude Code's working rules",
     ),
     (
         "openai_system.md",

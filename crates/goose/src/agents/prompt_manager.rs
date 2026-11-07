@@ -35,6 +35,10 @@ struct SystemPromptContext {
     include_extensions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     moim_system_prompt_block: Option<String>,
+    /// `claude`, `openai` or `other` once a session with a model is known; base prompts can add
+    /// rules for one family only (C230: the persistence rules in claude_system.md skip Claude).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_family: Option<&'static str>,
 }
 
 pub struct SystemPromptBuilder<'a, M> {
@@ -42,6 +46,7 @@ pub struct SystemPromptBuilder<'a, M> {
 
     system_prompt_override: Option<String>,
     base_template: &'static str,
+    model_family: Option<&'static str>,
     extensions_info: Vec<ExtensionInfo>,
     prompt_extras: IndexMap<String, String>,
     hints: Option<String>,
@@ -52,15 +57,19 @@ pub struct SystemPromptBuilder<'a, M> {
 
 /// Every model family gets the base prompt its maker wrote for agentic work by default: Claude
 /// models the working rules of Claude Code (A48), OpenAI GPT models OpenAI's Codex instructions
-/// (C214), all others goose's own. Agent providers such as claude-acp run their own prompt and
+/// (C214), all others the Claude Code rules as well (C230, Toni, 07.11.2026). Agent providers such as claude-acp run their own prompt and
 /// ignore goose's. `GOOSE_BASE_PROMPT_CLAUDE`, `GOOSE_BASE_PROMPT_OPENAI` and
 /// `GOOSE_BASE_PROMPT_OTHER` (`goose`, `openai` or `claude`) choose another base prompt per family.
-fn base_template_for(session: &Session) -> &'static str {
-    let model_name = session
+fn model_name_of(session: &Session) -> &str {
+    session
         .model_config
         .as_ref()
         .map(|model| model.model_name.as_str())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn base_template_for(session: &Session) -> &'static str {
+    let model_name = model_name_of(session);
     let choice = Config::global()
         .get_param::<String>(family_of(model_name).config_key())
         .ok();
@@ -87,7 +96,15 @@ impl ModelFamily {
         match self {
             ModelFamily::Claude => "claude_system.md",
             ModelFamily::OpenAi => "openai_system.md",
-            ModelFamily::Other => "system.md",
+            ModelFamily::Other => "claude_system.md",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ModelFamily::Claude => "claude",
+            ModelFamily::OpenAi => "openai",
+            ModelFamily::Other => "other",
         }
     }
 }
@@ -126,6 +143,10 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
     pub fn with_session(mut self, session: &Session) -> Self {
         self.system_prompt_override = session.system_prompt_override.clone();
         self.base_template = base_template_for(session);
+        self.model_family = session
+            .model_config
+            .as_ref()
+            .map(|_| family_of(model_name_of(session)).name());
         self.prompt_extras
             .extend(session.system_prompt_extras.clone());
         self
@@ -204,6 +225,7 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
             code_execution_mode: self.code_execution_mode,
             include_extensions: self.include_extensions,
             moim_system_prompt_block: moim::system_prompt_block(),
+            model_family: self.model_family,
         };
 
         let base_prompt = if let Some(override_prompt) = &self.system_prompt_override {
@@ -282,6 +304,7 @@ impl PromptManager {
 
             system_prompt_override: None,
             base_template: "system.md",
+            model_family: None,
             extensions_info: vec![],
             prompt_extras: IndexMap::new(),
             hints: None,
@@ -345,13 +368,34 @@ mod tests {
             );
         }
 
+        const PERSIST: &str = "# Carrying work through";
+        let claude = manager
+            .builder()
+            .with_session(&session_with_model("claude-opus-5-5"))
+            .build()
+            .unwrap();
+        assert!(
+            !claude.contains(PERSIST),
+            "Claude keeps Claude Code's text as is"
+        );
+
         let other = manager
             .builder()
             .with_session(&session_with_model("deepseek/deepseek-v4.1-flash"))
             .build()
             .unwrap();
-        assert!(!other.contains(RULE));
-        assert!(other.contains("# Response Guidelines"));
+        assert!(
+            other.contains(RULE),
+            "other models get claude_system.md (C230)"
+        );
+        assert!(
+            other.contains(PERSIST),
+            "other models get the persistence rules"
+        );
+        assert!(
+            !other.contains("OpenAI"),
+            "the source note must not reach the model"
+        );
 
         let mut overridden = session_with_model("claude-opus-5-5");
         overridden.system_prompt_override = Some("CUSTOM".to_string());
@@ -363,9 +407,12 @@ mod tests {
     fn each_family_gets_its_makers_base_prompt_unless_chosen_otherwise() {
         assert_eq!(template_for("gpt-6.1-terra", None), "openai_system.md");
         assert_eq!(template_for("openai/gpt-6.1-sol", None), "openai_system.md");
-        assert_eq!(template_for("openai/gpt-oss-120b", None), "system.md");
         assert_eq!(template_for("claude-opus-5-5", None), "claude_system.md");
-        assert_eq!(template_for("grok-4.7", None), "system.md");
+        assert_eq!(template_for("grok-4.7", None), "claude_system.md");
+        assert_eq!(
+            template_for("openai/gpt-oss-120b", None),
+            "claude_system.md"
+        );
 
         assert_eq!(template_for("gpt-6.1-terra", Some("goose")), "system.md");
         assert_eq!(template_for("grok-4.7", Some("openai")), "openai_system.md");
@@ -390,6 +437,17 @@ mod tests {
         assert!(prompt.contains("# Autonomy and persistence"));
         assert!(prompt.contains("# Turn Context"));
         assert!(prompt.contains("`load_skill`"));
+        for claude_code_rule in [
+            "system-controlled, unlike tool results",
+            "Report outcomes faithfully",
+            "Before deleting something, look at it first",
+            "do not retry the same call",
+        ] {
+            assert!(
+                prompt.contains(claude_code_rule),
+                "{claude_code_rule} (C230)"
+            );
+        }
         for codex_only in [
             "Codex",
             "functions.exec",
