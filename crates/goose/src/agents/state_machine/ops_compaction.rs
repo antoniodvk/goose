@@ -12,7 +12,7 @@ use crate::agents::state_machine::{
     yielded_with, ConversationEffect, Emitter, GooseEffect, Operation, OperationResult,
     SlashCommand,
 };
-use crate::context_mgmt::{compact_messages, count_context_tokens};
+use crate::context_mgmt::{compact_messages, count_context_tokens, is_compaction_continuation};
 use crate::conversation::message::{Message, MessageErrorKind, SystemNotificationType};
 use crate::conversation::{Conversation, EffectiveRole};
 use crate::providers::base::Provider;
@@ -222,6 +222,12 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
             if last_effective_role(messages)? == EffectiveRole::Assistant {
                 return not_applicable();
             }
+            // Compaction keeps the latest prompt whole, so a prompt above the threshold
+            // leaves the context there; compacting again before the next inference
+            // would repeat forever. A real overflow takes the bounded reactive path.
+            if compacted_since_last_inference(messages) {
+                return not_applicable();
+            }
             let tokens = self.context_tokens(session, conversation).await?;
             if tokens <= 0 || !self.over_threshold(tokens as usize) {
                 return not_applicable();
@@ -290,6 +296,14 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
             }
         }
     }
+}
+
+fn compacted_since_last_inference(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == rmcp::model::Role::Assistant && message.is_agent_visible())
+        .is_some_and(is_compaction_continuation)
 }
 
 fn compaction_failure_message(e: &anyhow::Error) -> Message {

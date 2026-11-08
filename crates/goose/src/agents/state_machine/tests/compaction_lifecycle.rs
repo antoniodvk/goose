@@ -176,6 +176,41 @@ async fn tokenless_provider_compacts_estimated_context() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_prompt_above_the_threshold_compacts_once_then_answers() -> Result<()> {
+    let (pipeline, api) = pipeline::test_pipeline_with(ProviderFeatures {
+        reports_usage: false,
+        ..ProviderFeatures::default()
+    })
+    .await?;
+    let pipeline = pipeline
+        .with_model_config(
+            goose_providers::model::ModelConfig::new("gpt-4.1").with_context_limit(Some(200)),
+        )
+        .await;
+    pipeline
+        .seed([
+            Message::user().with_text("earlier request"),
+            Message::assistant().with_text("earlier answer"),
+        ])
+        .await?;
+    api.on(SUMMARIZE_HISTORY).reply("summary");
+    api.on("Your context was compacted")
+        .reply("answered the large prompt");
+
+    let large_prompt = (0..500)
+        .map(|index| format!("token-{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let answered = pipeline.run([large_prompt.as_str()]).await?;
+
+    answered.assert_message(-1, Agent, "answered the large prompt");
+    assert_eq!(answered.history_replacements(), 1);
+    assert_eq!(api.call_count(), 2);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_failed_compact_command_reports_the_error_and_keeps_working() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
     api.on("do some work").reply("worked");

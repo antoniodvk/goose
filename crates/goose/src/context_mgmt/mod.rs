@@ -62,6 +62,21 @@ const MANUAL_COMPACT_CONTINUATION_TEXT: &str =
 Do not mention that you read a summary or that conversation summarization occurred.
 Just continue the conversation naturally based on the summarized context.";
 
+/// The agent-only note that `compact_messages` appends after its summary.
+pub(crate) fn is_compaction_continuation(message: &Message) -> bool {
+    if message.role != Role::Assistant || !message.is_agent_visible() || message.is_user_visible() {
+        return false;
+    }
+    let text = message.as_concat_text();
+    [
+        CONVERSATION_CONTINUATION_TEXT,
+        TOOL_LOOP_CONTINUATION_TEXT,
+        MANUAL_COMPACT_CONTINUATION_TEXT,
+    ]
+    .iter()
+    .any(|continuation| text.contains(continuation))
+}
+
 pub struct CompactionResult {
     pub conversation: Conversation,
     /// Billable usage of the summarization call, counting the raw model
