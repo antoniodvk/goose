@@ -232,10 +232,20 @@ pub(super) async fn emit_post_tool_use(
         _ => HookEvent::PostToolUseFailure,
     };
     if hook_manager.has_hooks(event) {
-        let context = HookContext::new(event, session_id)
+        let mut context = HookContext::new(event, session_id)
             .with_tool(tool_name.to_string(), tool_input.cloned())
             .with_tool_call_id(tool_call_id)
             .with_working_dir(working_dir.to_string());
+        // The hooks see what the tool returned (C244, like Claude Code's
+        // `tool_response`): the call result, or the error of a failed call.
+        let output = match result {
+            Ok(result) => serde_json::to_value(&*result),
+            Err(error) => serde_json::to_value(&*error),
+        };
+        match output {
+            Ok(output) => context = context.with_tool_output(output),
+            Err(error) => tracing::warn!("post-tool hook: tool output not serializable: {error}"),
+        }
         let feedback = hook_manager.emit_collecting_context(event, context).await;
         append_hook_feedback(result, event, &feedback);
     }

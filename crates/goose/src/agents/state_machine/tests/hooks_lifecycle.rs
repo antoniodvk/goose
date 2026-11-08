@@ -25,7 +25,7 @@ impl HookTestEnv {
         std::fs::write(
             plugin_dir.join("hooks/hooks.json"),
             format!(
-                r#"{{"hooks": {{"{event}": [{{"hooks": [{{"type": "command", "command": "sh ${{PLUGIN_ROOT}}/hook.sh"}}]}}]}}}}"#
+                r#"{{"hooks": {{"{event}": [{{"hooks": [{{"type": "command", "command": "sh '${{PLUGIN_ROOT}}/hook.sh'"}}]}}]}}}}"#
             ),
         )
         .unwrap();
@@ -366,7 +366,7 @@ impl RecordingHookEnv {
                     format!(r#""matcher": "{matcher}", "#)
                 };
                 format!(
-                    r#""{event}": [{{{matcher}"hooks": [{{"type": "command", "command": "sh ${{PLUGIN_ROOT}}/{script}"{on_failure}}}]}}]"#
+                    r#""{event}": [{{{matcher}"hooks": [{{"type": "command", "command": "sh '${{PLUGIN_ROOT}}/{script}'"{on_failure}}}]}}]"#
                 )
             })
             .collect();
@@ -522,6 +522,33 @@ async fn repeated_identical_calls_correlate_by_tool_call_id() -> Result<()> {
             "each call must pair with exactly one outcome by id"
         );
     }
+    Ok(())
+}
+
+/// post-tool hooks see what the tool returned (C244, like Claude Code's
+/// `tool_response`): the serialized call result in `tool_output`.
+#[tokio::test]
+async fn post_tool_use_receives_the_tool_output() -> Result<()> {
+    let env = RecordingHookEnv::new(&[("PostToolUse", "", "post.sh", RECORD_POST_SCRIPT)]);
+    let (pipeline, api) = test_pipeline().await?;
+    let pipeline = pipeline.with_hook_manager(env.hook_manager());
+    api.on("add one").call(ADD, value(1));
+    api.on("result: 1").reply("done");
+
+    pipeline.run(["add one"]).await?;
+
+    let posts = env.payloads("post.log");
+    assert_eq!(posts.len(), 1);
+    let content = posts[0]["tool_output"]["content"]
+        .as_array()
+        .expect("tool_output must carry the result content");
+    assert!(
+        content
+            .iter()
+            .any(|block| block["text"].as_str().is_some_and(|t| t.contains('1'))),
+        "tool_output must hold the calculator result, got {}",
+        posts[0]["tool_output"]
+    );
     Ok(())
 }
 
