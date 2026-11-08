@@ -181,7 +181,7 @@ impl Operation<Session, GooseEffect> for ToolSearchOperation {
                     {
                         Err(denial) => Err(denial),
                         Ok(()) => {
-                            let output = Ok(self
+                            let mut output = Ok(self
                                 .execute(session, tool_call.arguments.as_ref())
                                 .instrument(span.clone())
                                 .await);
@@ -192,7 +192,7 @@ impl Operation<Session, GooseEffect> for ToolSearchOperation {
                                 &tool_call.name,
                                 &request.id,
                                 tool_input.as_ref(),
-                                &output,
+                                &mut output,
                             )
                             .instrument(span.clone())
                             .await;

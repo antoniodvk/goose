@@ -214,6 +214,10 @@ pub(super) async fn emit_extended_pre_hooks(
 /// as does a transport error. Shared so every execution path classifies the
 /// outcome the same way. Takes the session id and working dir as strings because
 /// the caller inside [`with_post_tool_hooks`] holds owned copies, not a session.
+///
+/// What the hooks give back for the model (C198, like Claude Code's
+/// `additionalContext` and exit-2 feedback) is appended to `result`, so callers
+/// must record the result only after this returns.
 pub(super) async fn emit_post_tool_use(
     hook_manager: &HookManager,
     session_id: &str,
@@ -221,7 +225,7 @@ pub(super) async fn emit_post_tool_use(
     tool_name: &str,
     tool_call_id: &str,
     tool_input: Option<&serde_json::Value>,
-    result: &std::result::Result<CallToolResult, ErrorData>,
+    result: &mut std::result::Result<CallToolResult, ErrorData>,
 ) -> HookEvent {
     let event = match result {
         Ok(result) if result.is_error != Some(true) => HookEvent::PostToolUse,
@@ -232,9 +236,24 @@ pub(super) async fn emit_post_tool_use(
             .with_tool(tool_name.to_string(), tool_input.cloned())
             .with_tool_call_id(tool_call_id)
             .with_working_dir(working_dir.to_string());
-        hook_manager.emit(event, context).await;
+        let feedback = hook_manager.emit_collecting_context(event, context).await;
+        append_hook_feedback(result, event, &feedback);
     }
     event
+}
+
+fn append_hook_feedback(
+    result: &mut std::result::Result<CallToolResult, ErrorData>,
+    event: HookEvent,
+    feedback: &[String],
+) {
+    for text in feedback {
+        let note = format!("{event} hook additional context: {text}");
+        match result {
+            Ok(result) => result.content.push(ContentBlock::text(note)),
+            Err(error) => error.message = format!("{}\n\n{note}", error.message).into(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -255,6 +274,29 @@ impl ToolBatch {
             .get_or_insert_with(|| Message::user().with_generated_id_if_missing());
         if !response.get_tool_response_ids().contains(&request_id) {
             response.add_tool_response_with_metadata(request_id, result, metadata);
+        }
+    }
+
+    /// Swaps in the result with the post-tool hook feedback (C198). The plain
+    /// result stays recorded while the hooks run, so a cancellation then still
+    /// keeps it.
+    fn replace(
+        &mut self,
+        request_id: &str,
+        result: std::result::Result<CallToolResult, ErrorData>,
+    ) {
+        let Some(response) = self.response.as_mut() else {
+            return;
+        };
+        if let Some(existing) = response
+            .content
+            .iter_mut()
+            .find_map(|content| match content {
+                MessageContent::ToolResponse(res) if res.id == request_id => Some(res),
+                _ => None,
+            })
+        {
+            existing.tool_result = result;
         }
     }
 
@@ -287,7 +329,7 @@ fn with_post_tool_hooks(
         .map(|arguments| serde_json::Value::Object(arguments.clone()));
     let category = categorize_tool(&tool_name);
     let future = async move {
-        let result =
+        let mut result =
             crate::agents::large_response_handler::process_tool_response(result.result.await);
         batch
             .lock()
@@ -310,9 +352,12 @@ fn with_post_tool_hooks(
             &tool_name,
             &tool_call_id,
             tool_input.as_ref(),
-            &result,
+            &mut result,
         )
         .await;
+        if hook_manager.has_hooks(event) {
+            batch.lock().unwrap().replace(&tool_call_id, result.clone());
+        }
 
         if event == HookEvent::PostToolUse {
             let extended = match category {

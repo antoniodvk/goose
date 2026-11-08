@@ -678,6 +678,64 @@ impl HookManager {
         banners
     }
 
+    /// Like [`Self::emit`], but collects what the hooks want the model to read
+    /// after a finished tool call (C198, as Claude Code does for `PostToolUse`):
+    /// stderr of a hook that exits 2, and on exit 0 the JSON fields
+    /// `additionalContext` (top level or under `hookSpecificOutput`) and the
+    /// `reason` of `{"decision":"block"}`. The call has already run, so nothing
+    /// is denied; other output is ignored and failures are only logged.
+    pub async fn emit_collecting_context(&self, event: HookEvent, ctx: HookContext) -> Vec<String> {
+        let matched = self.matching_actions(event, &ctx);
+        if matched.is_empty() {
+            return Vec::new();
+        }
+        let payload = match serde_json::to_string(&ctx) {
+            Ok(s) => s,
+            Err(err) => {
+                warn!(event = %event, error = %err, "Failed to serialize hook context");
+                return Vec::new();
+            }
+        };
+        let mut context = Vec::new();
+        for (rule, action) in matched {
+            let LoadedAction::Command {
+                command, timeout, ..
+            } = action;
+            match self
+                .run_action(event, &ctx.session_id, rule, command, &payload, *timeout)
+                .await
+            {
+                Ok(run) => match run.output.status.code() {
+                    Some(0) => context.extend(extract_context(&run.output.stdout)),
+                    Some(2) => {
+                        let stderr = String::from_utf8_lossy(&run.output.stderr)
+                            .trim()
+                            .to_string();
+                        if !stderr.is_empty() {
+                            context.push(stderr);
+                        }
+                    }
+                    code => warn!(
+                        plugin = %rule.plugin_name,
+                        event = %event,
+                        command = %command,
+                        "hook exited with {:?}: {}",
+                        code,
+                        String::from_utf8_lossy(&run.output.stderr).trim(),
+                    ),
+                },
+                Err(err) => warn!(
+                    plugin = %rule.plugin_name,
+                    event = %event,
+                    command = %command,
+                    error = %err,
+                    "Plugin hook failed",
+                ),
+            }
+        }
+        context
+    }
+
     /// Like [`Self::emit`], but stops at the first rule that denies the event
     /// and returns the denial. A hook denies by exiting with status code 2
     /// (reason on stderr) or by printing `{"decision":"block","reason":"..."}`
@@ -882,6 +940,36 @@ fn extract_banner(stdout: &str) -> Option<String> {
 
     let parsed: BannerResp = serde_json::from_str(stdout).ok()?;
     parsed.banner.filter(|b| !b.is_empty())
+}
+
+/// Model-facing text from a successful hook's stdout, see
+/// [`HookManager::emit_collecting_context`].
+fn extract_context(stdout: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{') {
+        return Vec::new();
+    }
+    let Ok(json) = serde_json::from_str::<Value>(trimmed) else {
+        return Vec::new();
+    };
+    let field = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let mut out = Vec::new();
+    if json.get("decision").and_then(Value::as_str) == Some("block") {
+        out.extend(field(json.get("reason")));
+    }
+    out.extend(field(json.get("additionalContext")));
+    out.extend(field(
+        json.get("hookSpecificOutput")
+            .and_then(|h| h.get("additionalContext")),
+    ));
+    out
 }
 
 fn classify_run(run: &HookRun) -> HookVerdict {
@@ -2198,6 +2286,50 @@ mod tests {
             .await;
 
         assert_eq!(banners, vec!["  🌱 test banner"]);
+    }
+
+    #[test]
+    fn extract_context_reads_claude_and_block_fields() {
+        let claude =
+            br#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"look"}}"#;
+        assert_eq!(extract_context(claude), vec!["look"]);
+        assert_eq!(
+            extract_context(br#"{"additionalContext":" top "}"#),
+            vec!["top"]
+        );
+        assert_eq!(
+            extract_context(br#"{"decision":"block","reason":"fix it"}"#),
+            vec!["fix it"]
+        );
+        assert!(extract_context(b"plain text").is_empty());
+        assert!(extract_context(br#"{"additionalContext":""}"#).is_empty());
+        assert!(extract_context(br#"{"decision":"allow","reason":"x"}"#).is_empty());
+    }
+
+    #[tokio::test]
+    async fn emit_collecting_context_returns_json_and_exit_2_feedback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = r#"{"hooks":{"PostToolUse":[
+            {"matcher":"^read$","hooks":[{"type":"command","command":"printf '{\"hookSpecificOutput\":{\"additionalContext\":\"note\"}}'"}]},
+            {"matcher":"^read$","hooks":[{"type":"command","command":"echo broken >&2; exit 2"}]},
+            {"matcher":"^read$","hooks":[{"type":"command","command":"echo ignored; exit 1"}]},
+            {"matcher":"^shell$","hooks":[{"type":"command","command":"printf '{\"additionalContext\":\"other tool\"}'"}]}
+        ]}}"#;
+        let root = write_plugin(tmp.path(), "p", hooks);
+        let mgr = make_manager(vec![DiscoveredPlugin {
+            name: "p".into(),
+            root,
+            scope: PluginScope::User,
+        }]);
+
+        let context = mgr
+            .emit_collecting_context(
+                HookEvent::PostToolUse,
+                HookContext::new(HookEvent::PostToolUse, "s").with_tool("read", None),
+            )
+            .await;
+
+        assert_eq!(context, vec!["note", "broken"]);
     }
 
     #[tokio::test]

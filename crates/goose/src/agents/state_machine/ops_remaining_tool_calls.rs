@@ -178,7 +178,7 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
                                     )
                                     .instrument(span.clone())
                                     .await;
-                                    let (output, unclaimed) =
+                                    let (mut output, unclaimed) =
                                         if tool_call.name == FINAL_OUTPUT_TOOL_NAME
                                             && !active_final_output
                                         {
@@ -210,7 +210,7 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
                                         &tool_call.name,
                                         &request.id,
                                         tool_input.as_ref(),
-                                        &output,
+                                        &mut output,
                                     )
                                     .instrument(span.clone())
                                     .await;

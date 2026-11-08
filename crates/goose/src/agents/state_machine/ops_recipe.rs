@@ -321,7 +321,7 @@ impl Operation<Session, GooseEffect> for RecipeOperation {
             )
             .instrument(span.clone())
             .await;
-            let output = match &pre_tool {
+            let mut output = match &pre_tool {
                 // A denial returns before execution and emits no post event, the
                 // same shape ToolExecutionOperation has: its dispatch returns the
                 // denial before the post-hook wrapper is ever applied.
@@ -344,13 +344,16 @@ impl Operation<Session, GooseEffect> for RecipeOperation {
                     output
                 }
             };
-            let mut response = Message::user().with_generated_id_if_missing();
-            response.add_tool_response_with_metadata(
-                request.id.clone(),
-                output.clone(),
-                request.metadata.as_ref(),
-            );
-            *self.response.lock().unwrap() = Some(response);
+            let hold_response = |output: &std::result::Result<CallToolResult, ErrorData>| {
+                let mut response = Message::user().with_generated_id_if_missing();
+                response.add_tool_response_with_metadata(
+                    request.id.clone(),
+                    output.clone(),
+                    request.metadata.as_ref(),
+                );
+                *self.response.lock().unwrap() = Some(response);
+            };
+            hold_response(&output);
             if pre_tool.is_ok() {
                 // Post event carries the same tool_call_id as the pre events.
                 // The large-response rewrite ToolExecutionOperation applies is
@@ -363,10 +366,12 @@ impl Operation<Session, GooseEffect> for RecipeOperation {
                     &tool_call.name,
                     &request.id,
                     tool_input.as_ref(),
-                    &output,
+                    &mut output,
                 )
                 .instrument(span.clone())
                 .await;
+                // Held again so the post-tool hook feedback (C198) reaches the model.
+                hold_response(&output);
             }
             let response = self.take_response().expect("recipe response held");
             let response = emit.message(response);

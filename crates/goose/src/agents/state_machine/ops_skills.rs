@@ -547,7 +547,7 @@ impl Operation<Session, GooseEffect> for SkillOperation {
                             if result.is_error == Some(true) {
                                 span.record("error.type", "tool_error");
                             }
-                            let output = Ok(result);
+                            let mut output = Ok(result);
                             // Post event carries the same tool_call_id as the pre
                             // events. The large-response rewrite
                             // ToolExecutionOperation applies is deliberately not
@@ -560,7 +560,7 @@ impl Operation<Session, GooseEffect> for SkillOperation {
                                 &tool_call.name,
                                 &request.id,
                                 tool_input.as_ref(),
-                                &output,
+                                &mut output,
                             )
                             .instrument(span.clone())
                             .await;
