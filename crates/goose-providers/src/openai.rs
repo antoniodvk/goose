@@ -16,7 +16,7 @@ use crate::formats::openai::{
 };
 use crate::formats::openai_responses::{
     create_responses_request_for_model, get_responses_usage, responses_api_to_message,
-    ResponsesApiResponse,
+    stamp_replay_model, ResponsesApiResponse,
 };
 use crate::http_status::{extract_request_id, read_json_response};
 use crate::images::ImageFormat;
@@ -29,6 +29,7 @@ use crate::thinking::ThinkingEffort;
 use crate::usage::{parse_experiential_credits, AccountUsage};
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use reqwest::StatusCode;
 use serde_json::json;
 use std::collections::HashMap;
@@ -377,8 +378,17 @@ impl OpenAiProvider {
             .inspect_err(|e| {
                 let _ = log.error(e);
             })?;
+        // Replay data (the `phase` of text before a tool call) only goes back to
+        // the model that wrote it; the wire name is what the next request sends.
+        let replay_model = payload["model"].as_str().unwrap_or_default().to_string();
         if self.supports_streaming {
-            stream_responses_compat(response, log)
+            let stream = stream_responses_compat(response, log)?;
+            Ok(Box::pin(stream.map_ok(move |(mut message, usage)| {
+                if let Some(message) = &mut message {
+                    stamp_replay_model(message, &replay_model);
+                }
+                (message, usage)
+            })))
         } else {
             let request_id = extract_request_id(response.headers());
             let annotate = |e| annotate_request_id(e, request_id.as_deref());
@@ -390,8 +400,9 @@ impl OpenAiProvider {
                         e
                     )))
                 })?;
-            let message =
+            let mut message =
                 responses_api_to_message(&parsed).map_err(|e| annotate(ProviderError::from(e)))?;
+            stamp_replay_model(&mut message, &replay_model);
             let usage_data = get_responses_usage(&parsed);
             let usage_json = json.get("usage").unwrap_or(&serde_json::Value::Null);
             let mut usage = ProviderUsage::new(model_config.model_name.clone(), usage_data);

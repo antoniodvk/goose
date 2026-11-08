@@ -1,5 +1,5 @@
 use crate::config::paths::Paths;
-use crate::conversation::message::{Message, MessageContent, ToolRequest, RESPONSES_REPLAY_KEY};
+use crate::conversation::message::{Message, MessageContent};
 use crate::providers::api_client::{AuthProvider, RequestBuilderDecorator};
 use crate::providers::base::{
     ConfigKey, MessageStream, Provider, ProviderDef, ProviderMetadata,
@@ -18,7 +18,9 @@ use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use futures::{StreamExt, TryStreamExt};
 use goose_providers::errors::ProviderError;
-use goose_providers::formats::openai_responses::responses_api_to_streaming_message;
+use goose_providers::formats::openai_responses::{
+    replay_for, responses_api_to_streaming_message, stamp_replay_model,
+};
 use goose_providers::model::ModelConfig;
 use goose_providers::request_log::{start_log, LoggerHandleExt};
 use goose_providers::usage::{parse_chatgpt_usage, AccountUsage};
@@ -168,32 +170,6 @@ impl ChatGptCodexAuthState {
 
 static CHATGPT_CODEX_AUTH_STATE: LazyLock<Arc<ChatGptCodexAuthState>> =
     LazyLock::new(|| Arc::new(ChatGptCodexAuthState::new()));
-
-/// The reasoning items and `phase` to send back with this tool call. Reasoning
-/// is only valid for the model that produced it.
-fn replay_for<'a>(request: &'a ToolRequest, model_name: &str) -> Option<&'a Value> {
-    request
-        .metadata
-        .as_ref()?
-        .get(RESPONSES_REPLAY_KEY)
-        .filter(|replay| replay["model"] == model_name)
-}
-
-/// Replay data arrives from the shared Responses parser, which does not know
-/// the configured model name; `replay_for` compares against that name.
-fn stamp_replay_model(message: &mut Message, model_name: &str) {
-    for content in &mut message.content {
-        if let MessageContent::ToolRequest(request) = content {
-            if let Some(Value::Object(replay)) = request
-                .metadata
-                .as_mut()
-                .and_then(|metadata| metadata.get_mut(RESPONSES_REPLAY_KEY))
-            {
-                replay.insert("model".to_string(), json!(model_name));
-            }
-        }
-    }
-}
 
 fn build_input_items(messages: &[Message], model_name: &str) -> Result<Vec<Value>> {
     let mut items = Vec::new();
@@ -1319,7 +1295,7 @@ impl Provider for ChatGptCodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::message::Message;
+    use crate::conversation::message::{Message, RESPONSES_REPLAY_KEY};
     use goose_test_support::TEST_IMAGE_B64;
     use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ErrorCode, ErrorData};
     use rmcp::object;

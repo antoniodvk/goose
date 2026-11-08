@@ -1,5 +1,5 @@
 use crate::conversation::message::{
-    Message, MessageContentBlock, ProviderMetadata, RESPONSES_REPLAY_KEY,
+    Message, MessageContentBlock, ProviderMetadata, ToolRequest, RESPONSES_REPLAY_KEY,
 };
 use crate::conversation::token_usage::{ProviderUsage, Usage};
 use crate::documents::{
@@ -79,6 +79,8 @@ pub enum ResponseOutputItem {
         status: Option<String>,
         role: String,
         content: Vec<ResponseContentBlock>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
     },
     FunctionCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -414,7 +416,41 @@ pub enum ContentBlockPart {
     },
 }
 
-fn add_message_items(input_items: &mut Vec<Value>, messages: &[Message], supports_vision: bool) {
+/// The reasoning items and `phase` stored with this tool call, if the model that
+/// produced them is `model_name`. Reasoning is only valid for that model.
+pub fn replay_for<'a>(request: &'a ToolRequest, model_name: &str) -> Option<&'a Value> {
+    request
+        .metadata
+        .as_ref()?
+        .get(RESPONSES_REPLAY_KEY)
+        .filter(|replay| replay["model"] == model_name)
+}
+
+/// The Responses parser does not know the model it is reading; each provider
+/// stamps its replay data with the model name `replay_for` compares against.
+pub fn stamp_replay_model(message: &mut Message, model_name: &str) {
+    for content in &mut message.content {
+        if let MessageContentBlock::ToolRequest(request) = content {
+            if let Some(Value::Object(replay)) = request
+                .metadata
+                .as_mut()
+                .and_then(|metadata| metadata.get_mut(RESPONSES_REPLAY_KEY))
+            {
+                replay.insert("model".to_string(), json!(model_name));
+            }
+        }
+    }
+}
+
+/// Sends the `phase` of the assistant text before a tool call back with that
+/// text, as OpenAI asks for when `store` is false. Reasoning items stay out:
+/// this request does not ask for them (`include`), so none are stored.
+fn add_message_items(
+    input_items: &mut Vec<Value>,
+    messages: &[Message],
+    supports_vision: bool,
+    model_name: &str,
+) {
     for message in messages.iter().filter(|m| m.is_agent_visible()) {
         let role = match message.role {
             Role::User => "user",
@@ -442,11 +478,17 @@ fn add_message_items(input_items: &mut Vec<Value>, messages: &[Message], support
                 }
                 MessageContentBlock::ToolRequest(request) if message.role == Role::Assistant => {
                     if !text_items.is_empty() {
-                        input_items.push(json!({
+                        let mut item = json!({
                             "type": "message",
                             "role": role,
                             "content": text_items
-                        }));
+                        });
+                        if let Some(phase) =
+                            replay_for(request, model_name).and_then(|replay| replay.get("phase"))
+                        {
+                            item["phase"] = phase.clone();
+                        }
+                        input_items.push(item);
                         text_items = Vec::new();
                     }
 
@@ -658,6 +700,7 @@ pub fn create_responses_request_for_model(
         &mut input_items,
         messages,
         model_config.supports_vision.unwrap_or_default(),
+        wire_model_name,
     );
 
     let (model_name, legacy_reasoning_effort) = extract_reasoning_effort(capability_model_name);
@@ -909,6 +952,7 @@ fn sanitize_tool_request_id(id: &str, seen_ids: &mut HashSet<String>) -> anyhow:
 pub fn responses_api_to_message(response: &ResponsesApiResponse) -> anyhow::Result<Message> {
     let mut content = Vec::new();
     let mut tool_request_ids = HashSet::new();
+    let mut pending_replay = PendingReplay::default();
 
     for item in &response.output {
         match item {
@@ -917,8 +961,10 @@ pub fn responses_api_to_message(response: &ResponsesApiResponse) -> anyhow::Resu
             }
             ResponseOutputItem::Message {
                 content: msg_content,
+                phase,
                 ..
             } => {
+                pending_replay.phase = phase.clone().or(pending_replay.phase.take());
                 for block in msg_content {
                     match block {
                         ResponseContentBlock::OutputText { text, .. } => {
@@ -965,10 +1011,11 @@ pub fn responses_api_to_message(response: &ResponsesApiResponse) -> anyhow::Resu
                 let request_id = sanitize_tool_request_id(&request_id, &mut tool_request_ids)?;
                 let parsed_args = parse_tool_arguments(arguments)?;
 
-                content.push(MessageContentBlock::tool_request(
+                content.push(MessageContentBlock::tool_request_with_metadata(
                     request_id,
                     Ok(CallToolRequestParams::new(strip_unicode_tags(name))
                         .with_arguments(object(parsed_args))),
+                    pending_replay.take_metadata().as_ref(),
                 ));
             }
         }
@@ -1366,7 +1413,7 @@ mod document_tests {
 
     fn format(messages: &[Message]) -> Vec<Value> {
         let mut items = Vec::new();
-        add_message_items(&mut items, messages, true);
+        add_message_items(&mut items, messages, true, "gpt-6.1-terra");
         items
     }
 
@@ -1798,6 +1845,126 @@ mod tests {
         Ok(())
     }
 
+    fn assistant_with_phase(phase: &str, model: &str) -> Message {
+        let mut metadata = ProviderMetadata::new();
+        metadata.insert(
+            RESPONSES_REPLAY_KEY.to_string(),
+            json!({ "model": model, "phase": phase }),
+        );
+        Message::assistant()
+            .with_text("Ich sehe nach.")
+            .with_tool_request_with_metadata(
+                "call_1",
+                Ok(CallToolRequestParams::new("shell")),
+                Some(&metadata),
+                None,
+            )
+    }
+
+    #[test]
+    fn request_sends_phase_back_for_the_same_model() -> anyhow::Result<()> {
+        let config = ModelConfig::new("gpt-6.1-terra");
+        let messages = vec![
+            Message::user().with_text("Los"),
+            assistant_with_phase("commentary", "gpt-6.1-terra"),
+        ];
+
+        let payload = create_responses_request(&config, "", &messages, &[])?;
+        let input = payload["input"].as_array().unwrap();
+
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[1]["phase"], "commentary");
+        assert_eq!(input[2]["type"], "function_call");
+        assert!(input[2].get("phase").is_none());
+        assert!(
+            input.iter().all(|item| item["type"] != "reasoning"),
+            "no reasoning without include"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_leaves_out_phase_of_another_model() -> anyhow::Result<()> {
+        let config = ModelConfig::new("gpt-4.1");
+        let messages = vec![
+            Message::user().with_text("Los"),
+            assistant_with_phase("commentary", "gpt-6.1-terra"),
+        ];
+
+        let payload = create_responses_request(&config, "", &messages, &[])?;
+
+        assert!(payload["input"][1].get("phase").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn stamped_stream_replay_goes_back_with_its_text() -> anyhow::Result<()> {
+        let mut content = process_streaming_output_items(
+            vec![
+                ResponseOutputItemInfo::Message {
+                    id: Some("msg_1".to_string()),
+                    status: Some("completed".to_string()),
+                    phase: Some("commentary".to_string()),
+                    role: "assistant".to_string(),
+                    content: vec![ContentBlockPart::OutputText {
+                        text: "Ich sehe nach.".to_string(),
+                        annotations: None,
+                        logprobs: None,
+                    }],
+                },
+                ResponseOutputItemInfo::FunctionCall {
+                    id: None,
+                    status: None,
+                    call_id: Some("call_1".to_string()),
+                    name: "shell".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            ],
+            false,
+        )?;
+        let mut message = Message::assistant();
+        message.content.append(&mut content);
+        stamp_replay_model(&mut message, "gpt-6.1-terra");
+
+        let config = ModelConfig::new("gpt-6.1-terra");
+        let payload = create_responses_request(
+            &config,
+            "",
+            &[Message::user().with_text("Los"), message],
+            &[],
+        )?;
+
+        assert_eq!(payload["input"][1]["phase"], "commentary");
+        Ok(())
+    }
+
+    #[test]
+    fn non_streaming_response_keeps_phase_for_the_tool_call() -> anyhow::Result<()> {
+        let response: ResponsesApiResponse = serde_json::from_value(json!({
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1737368310,
+            "status": "completed",
+            "model": "gpt-6.1-terra",
+            "output": [
+                {"type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
+                 "phase": "commentary",
+                 "content": [{"type": "output_text", "text": "Ich sehe nach.", "annotations": []}]},
+                {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"}
+            ]
+        }))?;
+
+        let message = responses_api_to_message(&response)?;
+        let replay = message
+            .content
+            .iter()
+            .find_map(replay_of)
+            .expect("tool call carries the phase");
+
+        assert_eq!(replay["phase"], "commentary");
+        Ok(())
+    }
+
     #[test]
     fn answers_without_replay_data_add_no_metadata() -> anyhow::Result<()> {
         let content = process_streaming_output_items(
@@ -2076,6 +2243,7 @@ mod tests {
                 ResponseOutputItem::Message {
                     id: Some("msg_1".to_string()),
                     status: Some("completed".to_string()),
+                    phase: None,
                     role: "assistant".to_string(),
                     content: vec![ResponseContentBlock::ToolCall {
                         id: "call_\u{E0041}1".to_string(),
@@ -2128,6 +2296,7 @@ mod tests {
                 ResponseOutputItem::Message {
                     id: Some("msg_1".to_string()),
                     status: Some("completed".to_string()),
+                    phase: None,
                     role: "assistant".to_string(),
                     content: vec![ResponseContentBlock::ToolCall {
                         id: "call_1".to_string(),
@@ -2172,6 +2341,7 @@ mod tests {
                 output: vec![ResponseOutputItem::Message {
                     id: Some("msg_1".to_string()),
                     status: Some("completed".to_string()),
+                    phase: None,
                     role: "assistant".to_string(),
                     content: vec![ResponseContentBlock::ToolCall {
                         id: "call_1".to_string(),
