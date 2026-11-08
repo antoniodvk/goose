@@ -150,7 +150,7 @@ fn load_hints_from_directory(
                     &gitignore,
                 );
                 if !expanded.is_empty() {
-                    contents.push(expanded);
+                    contents.push(labeled_hint_content(&hints_path, &expanded));
                 }
             }
         }
@@ -162,9 +162,28 @@ fn load_hints_from_directory(
         Some(format!(
             "### Subdirectory Hints ({})\n{}",
             directory.display(),
-            contents.join("\n")
+            contents.join("\n\n")
         ))
     }
+}
+
+/// Absolute, normalized path of a hint file for display (`..` resolved, no Windows
+/// `\\?\` prefix), or the path as given if it cannot be resolved.
+fn hint_display_path(path: &Path) -> String {
+    let Ok(canonical) = path.canonicalize() else {
+        return path.display().to_string();
+    };
+    let shown = canonical.display().to_string();
+    match shown.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+        _ => shown,
+    }
+}
+
+/// Prefixes a hint file's content with its source path, like Claude Code's
+/// "Contents of <path>", so relative paths inside it resolve against the right directory.
+fn labeled_hint_content(path: &Path, content: &str) -> String {
+    format!("Contents of {}:\n\n{}", hint_display_path(path), content)
 }
 
 fn find_git_root(start_dir: &Path) -> Option<&Path> {
@@ -263,7 +282,8 @@ pub fn load_hint_files(
                 &global_ignore_patterns,
             );
             if !expanded_content.is_empty() {
-                global_hints_contents.push(expanded_content);
+                global_hints_contents
+                    .push(labeled_hint_content(global_hints_path, &expanded_content));
             }
         }
     }
@@ -285,7 +305,7 @@ pub fn load_hint_files(
                     ignore_patterns,
                 );
                 if !expanded_content.is_empty() {
-                    local_hints_contents.push(expanded_content);
+                    local_hints_contents.push(labeled_hint_content(&hints_path, &expanded_content));
                 }
             }
         }
@@ -294,7 +314,7 @@ pub fn load_hint_files(
     let mut hints = String::new();
     if !global_hints_contents.is_empty() {
         hints.push_str("\n### Global Hints\nThese are my global goose hints.\n");
-        hints.push_str(&global_hints_contents.join("\n"));
+        hints.push_str(&global_hints_contents.join("\n\n"));
     }
 
     if !local_hints_contents.is_empty() {
@@ -304,7 +324,7 @@ pub fn load_hint_files(
         hints.push_str(
             "### Project Hints\nThese are hints for working on the project in this directory.\n",
         );
-        hints.push_str(&local_hints_contents.join("\n"));
+        hints.push_str(&local_hints_contents.join("\n\n"));
     }
 
     hints
@@ -332,6 +352,48 @@ mod tests {
         let hints = load_hint_files(dir.path(), &[GOOSE_HINTS_FILENAME.to_string()], &gitignore);
 
         assert!(hints.contains("Test hint content"));
+    }
+
+    #[test]
+    fn test_each_hint_file_is_labeled_with_its_absolute_path() {
+        let root = TempDir::new().unwrap();
+        fs::create_dir(root.path().join(".git")).unwrap();
+        let project = root.path().join("app");
+        fs::create_dir(&project).unwrap();
+        fs::write(root.path().join(AGENTS_MD_FILENAME), "root rules").unwrap();
+        fs::write(project.join(AGENTS_MD_FILENAME), "app rules").unwrap();
+
+        let gitignore = create_dummy_gitignore();
+        let hints = load_hint_files(&project, &[AGENTS_MD_FILENAME.to_string()], &gitignore);
+
+        for (dir, content) in [
+            (root.path().to_path_buf(), "root rules"),
+            (project, "app rules"),
+        ] {
+            let label = format!(
+                "Contents of {}:\n\n{}",
+                hint_display_path(&dir.join(AGENTS_MD_FILENAME)),
+                content
+            );
+            assert!(hints.contains(&label), "missing {label:?} in {hints:?}");
+        }
+        assert!(!hints.contains(r"\\?\"));
+        assert!(!hints.contains(".."));
+    }
+
+    #[test]
+    fn test_hint_display_path_resolves_parent_components() {
+        let root = TempDir::new().unwrap();
+        let sub = root.path().join("config");
+        fs::create_dir(&sub).unwrap();
+        fs::write(root.path().join("CLAUDE.md"), "x").unwrap();
+
+        let shown = hint_display_path(&sub.join("..").join("CLAUDE.md"));
+
+        assert!(!shown.contains(".."), "{shown}");
+        assert!(!shown.starts_with(r"\\?\"), "{shown}");
+        assert!(Path::new(&shown).is_absolute(), "{shown}");
+        assert!(shown.ends_with("CLAUDE.md"), "{shown}");
     }
 
     #[test]
@@ -504,9 +566,14 @@ mod tests {
             &gitignore,
         );
 
-        assert!(
-            hints.contains("Root hints content\nSubdir hints content\ncurrent_dir hints content")
-        );
+        let expected = [
+            (project_root.to_path_buf(), "Root hints content"),
+            (subdir, "Subdir hints content"),
+            (current_dir, "current_dir hints content"),
+        ]
+        .map(|(dir, content)| labeled_hint_content(&dir.join(GOOSE_HINTS_FILENAME), content))
+        .join("\n\n");
+        assert!(hints.contains(&expected), "{hints:?}");
     }
 
     #[test]
