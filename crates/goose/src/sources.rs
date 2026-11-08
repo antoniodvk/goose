@@ -4,7 +4,7 @@
 
 use crate::config::paths::Paths;
 use crate::skills::{
-    build_skill_md, discover_skills, infer_skill_name, is_global_skill_dir,
+    build_skill_md, discover_all_skills, infer_skill_name, is_global_skill_dir,
     parse_skill_frontmatter, resolve_discoverable_skill_dir, resolve_skill_dir, skill_base_dir,
     validate_skill_name,
 };
@@ -925,7 +925,7 @@ pub fn list_sources_with_roots(
                     .filter(|p| !p.is_empty())
                     .map(PathBuf::from);
                 sources.extend(
-                    discover_skills(working_dir.as_deref())
+                    discover_all_skills(working_dir.as_deref())
                         .into_iter()
                         .filter(|s| s.source_type == SourceType::Skill),
                 );
@@ -949,7 +949,7 @@ pub fn list_sources_with_roots(
                             if Some(wd_path.as_path()) == already_scanned {
                                 continue;
                             }
-                            for skill in discover_skills(Some(&wd_path)) {
+                            for skill in discover_all_skills(Some(&wd_path)) {
                                 if skill.source_type != SourceType::Skill || skill.global {
                                     continue;
                                 }
@@ -974,7 +974,7 @@ pub fn list_sources_with_roots(
                     .filter(|p| !p.is_empty())
                     .map(PathBuf::from);
                 sources.extend(
-                    discover_skills(working_dir.as_deref())
+                    discover_all_skills(working_dir.as_deref())
                         .into_iter()
                         .filter(|s| s.source_type == SourceType::BuiltinSkill)
                         .map(builtin_skill_entry),

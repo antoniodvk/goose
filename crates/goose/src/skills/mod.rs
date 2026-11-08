@@ -622,6 +622,34 @@ pub fn discover_skills(working_dir: Option<&Path>) -> Vec<SourceEntry> {
     discover_skills_with_config(working_dir, Config::global())
 }
 
+/// Every skill, switched off or not, for listings that let the user switch them
+/// (`sources/list`). A switched-off skill carries the property `disabled: true`.
+pub fn discover_all_skills(working_dir: Option<&Path>) -> Vec<SourceEntry> {
+    let config = Config::global();
+    let disabled = disabled_skills(config);
+    let mut skills = discover_all_skills_with_config(working_dir, config);
+    for skill in &mut skills {
+        if disabled.contains(&skill.name) {
+            skill
+                .properties
+                .insert("disabled".into(), Value::Bool(true));
+        }
+    }
+    skills
+}
+
+/// Names of switched-off skills, user-made and built-in alike (config or environment,
+/// JSON list): the Goose App's settings write it for Toni's Goose (N749), Goose Code
+/// sets it in its environment (C97). A switched-off skill is missing from the system
+/// prompt, `load_skill` and the slash commands.
+fn disabled_skills(config: &Config) -> HashSet<String> {
+    config
+        .get_param::<Vec<String>>("GOOSE_DISABLED_SKILLS")
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
 fn discover_skills_in_dirs(dirs: Vec<SkillDirectory>) -> Vec<SourceEntry> {
     let roots = dirs.into_iter().map(|dir| SkillRoot {
         path: dir.path,
@@ -635,16 +663,24 @@ fn discover_skills_in_dirs(dirs: Vec<SkillDirectory>) -> Vec<SourceEntry> {
 }
 
 fn discover_skills_with_config(working_dir: Option<&Path>, config: &Config) -> Vec<SourceEntry> {
+    let disabled = disabled_skills(config);
+    discover_all_skills_with_config(working_dir, config)
+        .into_iter()
+        .filter(|skill| !disabled.contains(&skill.name))
+        .collect()
+}
+
+fn discover_all_skills_with_config(
+    working_dir: Option<&Path>,
+    config: &Config,
+) -> Vec<SourceEntry> {
     let dirs = all_skill_dirs_with_config(working_dir, config);
     let mut skills = discover_skills_in_dirs(dirs);
     let mut seen: HashSet<String> = skills.iter().map(|source| source.name.clone()).collect();
-    let disabled_builtins: Vec<String> = config
-        .get_param("GOOSE_DISABLED_BUILTIN_SKILLS")
-        .unwrap_or_default();
 
     for content in builtin::get_all() {
         if let Some(source) = parse_skill_content(content, &PathBuf::new(), true, true) {
-            if !seen.contains(&source.name) && !disabled_builtins.contains(&source.name) {
+            if !seen.contains(&source.name) {
                 seen.insert(source.name.clone());
                 let path = format!("builtin://skills/{}", source.name);
                 skills.push(SourceEntry {
@@ -841,6 +877,44 @@ mod tests {
         assert!(!skill.global);
         assert!(!skill.writable);
         assert!(Path::new(&skill.path).starts_with(&plugin_root));
+    }
+
+    #[test]
+    fn disabled_skills_are_hidden_from_discovery_but_listed() {
+        let project = tempfile::tempdir().unwrap();
+        let path_root = tempfile::tempdir().unwrap();
+        write_test_skill(&path_root.path().join("config/skills/mine"), "mine", "body");
+        write_test_skill(
+            &path_root.path().join("config/skills/other"),
+            "other",
+            "body",
+        );
+
+        let config = Config::new(path_root.path().join("test-config.yaml"), "skills-test").unwrap();
+        config
+            .set_param("GOOSE_DISABLED_SKILLS", vec!["mine", "goose-doc-guide"])
+            .unwrap();
+        let _guard = env_lock::lock_env([
+            ("GOOSE_PATH_ROOT", path_root.path().to_str()),
+            ("GOOSE_DISABLED_SKILLS", None),
+            ("GOOSE_SKILL_LISTING", None),
+        ]);
+
+        let names = |skills: Vec<SourceEntry>| -> HashSet<String> {
+            skills.into_iter().map(|skill| skill.name).collect()
+        };
+        let active = names(discover_skills_with_config(Some(project.path()), &config));
+        assert!(active.contains("other"));
+        assert!(active.contains("web-search"));
+        assert!(!active.contains("mine"));
+        assert!(!active.contains("goose-doc-guide"));
+
+        let all = names(discover_all_skills_with_config(
+            Some(project.path()),
+            &config,
+        ));
+        assert!(all.contains("mine"));
+        assert!(all.contains("goose-doc-guide"));
     }
 
     #[test]
