@@ -155,12 +155,14 @@ pub const DECLINED_RESPONSE: &str = "The user has declined to run this tool. \
 /// Tool meta key holding the reason a security inspector blocked the call.
 pub const TOOL_BLOCKED_REASON_KEY: &str = "goose.blocked_reason";
 
-/// Tool meta key holding the reason the client (app) declined the call on its own.
+/// Tool meta key holding the decline text the client (app) sent with the decline:
+/// the app's own reason with its instruction, or what the user wrote instead (N786).
 pub const TOOL_DECLINE_REASON_KEY: &str = "goose.decline_reason";
 
 /// Response for a declined tool call: the security block reason when an inspector
-/// blocked it, the client decline reason when the app declined it automatically,
-/// otherwise the user's decline.
+/// blocked it, the client's decline text verbatim when it sent one (the client owns
+/// the instruction, so a user's "do X instead" is not contradicted), otherwise the
+/// user's decline.
 pub fn declined_response(request: &ToolRequest) -> String {
     let meta = request.tool_meta.as_ref();
     if let Some(reason) = meta
@@ -177,11 +179,7 @@ pub fn declined_response(request: &ToolRequest) -> String {
         .and_then(|meta| meta.get(TOOL_DECLINE_REASON_KEY))
         .and_then(|value| value.as_str())
     {
-        return format!(
-            "{reason}\n\
-             DO NOT attempt to call this tool again. \
-             If there are no alternative methods to proceed, clearly explain the situation and STOP."
-        );
+        return reason.to_string();
     }
     DECLINED_RESPONSE.to_string()
 }
