@@ -11,8 +11,9 @@ use crate::declarative::{DeclarativeProviderConfig, KeyResolver};
 use crate::errors::ProviderError;
 use crate::formats::openai::is_openai_responses_model;
 use crate::formats::openai::{
-    create_request_with_options, get_cost, get_usage, is_reserved_request_param_key,
-    record_response_metadata, response_to_message, OpenAiFormatOptions,
+    create_request_with_options, extract_reasoning_effort, get_cost, get_usage,
+    is_reserved_request_param_key, record_response_metadata, response_to_message,
+    OpenAiFormatOptions,
 };
 use crate::formats::openai_responses::{
     create_responses_request_for_model, get_responses_usage, responses_api_to_message,
@@ -54,6 +55,28 @@ fn is_experiential_host(host: &str) -> bool {
         .ok()
         .and_then(|url| url.host_str().map(|name| name == EXPERIENTIAL_HOST))
         .unwrap_or(false)
+}
+
+const ENCRYPTED_REASONING: &str = "reasoning.encrypted_content";
+
+/// With `store: false` OpenAI keeps no reasoning between requests; it returns
+/// the reasoning encrypted when asked, so the next request can send it back.
+/// Models without reasoning reject this field, so callers only add it for
+/// reasoning models.
+fn request_encrypted_reasoning(payload: &mut serde_json::Value) {
+    if payload["store"] != serde_json::Value::Bool(false) {
+        return;
+    }
+    let include = payload
+        .as_object_mut()
+        .unwrap()
+        .entry("include")
+        .or_insert_with(|| json!([]));
+    if let Some(include) = include.as_array_mut() {
+        if !include.iter().any(|item| item == ENCRYPTED_REASONING) {
+            include.push(json!(ENCRYPTED_REASONING));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -331,6 +354,12 @@ impl OpenAiProvider {
             messages,
             tools,
         )?;
+        if self.native_openai {
+            let (reasoning_model, _) = extract_reasoning_effort(capability_model);
+            if request_config.openai_reasoning_for_model(&reasoning_model) {
+                request_encrypted_reasoning(&mut payload);
+            }
+        }
         payload["stream"] = serde_json::Value::Bool(self.supports_streaming);
         self.stream_responses_payload(model_config, payload).await
     }
@@ -1141,6 +1170,21 @@ mod tests {
     use super::*;
     use crate::api_client::AuthMethod;
     use serde_json::json;
+
+    #[test]
+    fn encrypted_reasoning_is_requested_only_without_store() {
+        let mut payload = json!({ "store": false, "include": ["file_search_call.results"] });
+        request_encrypted_reasoning(&mut payload);
+        request_encrypted_reasoning(&mut payload);
+        assert_eq!(
+            payload["include"],
+            json!(["file_search_call.results", "reasoning.encrypted_content"])
+        );
+
+        let mut stored = json!({ "store": true });
+        request_encrypted_reasoning(&mut stored);
+        assert!(stored.get("include").is_none());
+    }
 
     fn make_provider(name: &str) -> OpenAiProvider {
         OpenAiProvider {

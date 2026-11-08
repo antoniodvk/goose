@@ -68,6 +68,8 @@ pub enum ResponseOutputItem {
         id: Option<String>,
         #[serde(default)]
         summary: Vec<SummaryText>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
     },
     Message {
         // `id` and `status` are required when the OpenAI API emits these
@@ -442,9 +444,10 @@ pub fn stamp_replay_model(message: &mut Message, model_name: &str) {
     }
 }
 
-/// Sends the `phase` of the assistant text before a tool call back with that
-/// text, as OpenAI asks for when `store` is false. Stored reasoning items are
-/// not replayed here; only `chatgpt_codex` sends them back.
+/// Sends the encrypted reasoning and the `phase` of the assistant text before a
+/// tool call back with that call, as OpenAI asks for when `store` is false.
+/// Reasoning is only stored when the request asked for it
+/// (`include: ["reasoning.encrypted_content"]`).
 fn add_message_items(
     input_items: &mut Vec<Value>,
     messages: &[Message],
@@ -477,15 +480,22 @@ fn add_message_items(
                     }
                 }
                 MessageContentBlock::ToolRequest(request) if message.role == Role::Assistant => {
+                    // The model reasons first, then writes its preamble, then calls
+                    // the tool; the preamble is still buffered in `text_items`.
+                    let replay = replay_for(request, model_name);
+                    if let Some(reasoning) = replay
+                        .and_then(|replay| replay.get("reasoning"))
+                        .and_then(Value::as_array)
+                    {
+                        input_items.extend(reasoning.iter().cloned());
+                    }
                     if !text_items.is_empty() {
                         let mut item = json!({
                             "type": "message",
                             "role": role,
                             "content": text_items
                         });
-                        if let Some(phase) =
-                            replay_for(request, model_name).and_then(|replay| replay.get("phase"))
-                        {
+                        if let Some(phase) = replay.and_then(|replay| replay.get("phase")) {
                             item["phase"] = phase.clone();
                         }
                         input_items.push(item);
@@ -956,8 +966,13 @@ pub fn responses_api_to_message(response: &ResponsesApiResponse) -> anyhow::Resu
 
     for item in &response.output {
         match item {
-            ResponseOutputItem::Reasoning { summary, .. } => {
+            ResponseOutputItem::Reasoning {
+                summary,
+                encrypted_content,
+                ..
+            } => {
                 content.extend(reasoning_from_summary(summary));
+                pending_replay.add_reasoning(summary, encrypted_content.as_deref());
             }
             ResponseOutputItem::Message {
                 content: msg_content,
@@ -1045,6 +1060,23 @@ struct PendingReplay {
 }
 
 impl PendingReplay {
+    /// Keeps a reasoning item for replay. Only an item with encrypted content
+    /// can go back: with `store: false` there is no stored id to point at.
+    fn add_reasoning(&mut self, summary: &[SummaryText], encrypted_content: Option<&str>) {
+        let Some(encrypted_content) = encrypted_content else {
+            return;
+        };
+        let summary: Vec<Value> = summary
+            .iter()
+            .map(|s| json!({ "type": "summary_text", "text": s.text }))
+            .collect();
+        self.reasoning.push(json!({
+            "type": "reasoning",
+            "summary": summary,
+            "encrypted_content": encrypted_content,
+        }));
+    }
+
     fn take_metadata(&mut self) -> Option<ProviderMetadata> {
         if self.reasoning.is_empty() && self.phase.is_none() {
             return None;
@@ -1081,17 +1113,7 @@ fn process_streaming_output_items(
                 ..
             } => {
                 content.extend(reasoning_from_summary(&summary));
-                if let Some(encrypted_content) = encrypted_content {
-                    let summary: Vec<Value> = summary
-                        .iter()
-                        .map(|s| json!({ "type": "summary_text", "text": s.text }))
-                        .collect();
-                    pending_replay.reasoning.push(json!({
-                        "type": "reasoning",
-                        "summary": summary,
-                        "encrypted_content": encrypted_content,
-                    }));
-                }
+                pending_replay.add_reasoning(&summary, encrypted_content.as_deref());
             }
             ResponseOutputItemInfo::Message {
                 content: parts,
@@ -1876,9 +1898,51 @@ mod tests {
         assert_eq!(input[1]["phase"], "commentary");
         assert_eq!(input[2]["type"], "function_call");
         assert!(input[2].get("phase").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn request_sends_reasoning_back_before_its_text_and_call() -> anyhow::Result<()> {
+        let config = ModelConfig::new("gpt-6.1-terra");
+        let mut metadata = ProviderMetadata::new();
+        metadata.insert(
+            RESPONSES_REPLAY_KEY.to_string(),
+            json!({
+                "model": "gpt-6.1-terra",
+                "phase": "commentary",
+                "reasoning": [{"type": "reasoning", "summary": [], "encrypted_content": "enc-1"}]
+            }),
+        );
+        let messages = vec![
+            Message::user().with_text("Los"),
+            Message::assistant()
+                .with_text("Ich sehe nach.")
+                .with_tool_request_with_metadata(
+                    "call_1",
+                    Ok(CallToolRequestParams::new("shell")),
+                    Some(&metadata),
+                    None,
+                ),
+        ];
+
+        let payload = create_responses_request(&config, "", &messages, &[])?;
+        let input = payload["input"].as_array().unwrap();
+
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["encrypted_content"], "enc-1");
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[2]["phase"], "commentary");
+        assert_eq!(input[3]["type"], "function_call");
+
+        let other_model =
+            create_responses_request(&ModelConfig::new("gpt-4.1"), "", &messages, &[])?;
         assert!(
-            input.iter().all(|item| item["type"] != "reasoning"),
-            "this format does not replay reasoning"
+            other_model["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["type"] != "reasoning"),
+            "reasoning only goes back to the model that wrote it"
         );
         Ok(())
     }
@@ -1947,6 +2011,7 @@ mod tests {
             "status": "completed",
             "model": "gpt-6.1-terra",
             "output": [
+                {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc-1"},
                 {"type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
                  "phase": "commentary",
                  "content": [{"type": "output_text", "text": "Ich sehe nach.", "annotations": []}]},
@@ -1962,6 +2027,8 @@ mod tests {
             .expect("tool call carries the phase");
 
         assert_eq!(replay["phase"], "commentary");
+        assert_eq!(replay["reasoning"][0]["encrypted_content"], "enc-1");
+        assert!(replay["reasoning"][0].get("id").is_none());
         Ok(())
     }
 
