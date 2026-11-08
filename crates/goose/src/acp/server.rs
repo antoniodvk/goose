@@ -1292,8 +1292,10 @@ impl GooseAcpAgent {
                         readable_subagent_output(&output),
                     ),
                     SubagentOutcome::Failed(reason) => (SubagentFinishedOutcome::Failed, reason),
-                    // Only a closed parent session cancels a background subagent.
-                    SubagentOutcome::Cancelled => return Ok(()),
+                    // A closed parent returned above; this one was stopped on its own.
+                    SubagentOutcome::Cancelled => {
+                        (SubagentFinishedOutcome::Cancelled, String::new())
+                    }
                 };
                 if !self.supports_goose_custom_notifications() {
                     warn!(%subagent_id, "client cannot receive the result of a background subagent");
@@ -2654,6 +2656,26 @@ impl GooseAcpAgent {
             run_id: active_run_id,
             message_id,
         })
+    }
+
+    async fn on_cancel_subagent(
+        &self,
+        req: CancelSubagentRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        let sessions = self.sessions.lock().await;
+        let cancelled = sessions.get(&req.session_id).is_some_and(|session| {
+            session
+                .agent
+                .background_subagents()
+                .cancel(&req.session_id, &req.subagent_id)
+        });
+        drop(sessions);
+        if !cancelled {
+            return Err(agent_client_protocol::Error::invalid_params()
+                .data("no such background subagent running in this session"));
+        }
+        info!(session_id = %req.session_id, subagent_id = %req.subagent_id, "Background subagent cancelled");
+        Ok(EmptyResponse {})
     }
 
     async fn on_cancel(

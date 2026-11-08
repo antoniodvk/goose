@@ -49,7 +49,7 @@ pub struct SubagentFinishedUpdate {
     /// The `description` the delegate was started with, else a generic name.
     pub description: String,
     pub outcome: SubagentFinishedOutcome,
-    /// Completed: the subagent's report. Failed: why it failed.
+    /// Completed: the subagent's report. Failed: why it failed. Cancelled: empty.
     pub text: String,
 }
 
@@ -58,6 +58,8 @@ pub struct SubagentFinishedUpdate {
 pub enum SubagentFinishedOutcome {
     Completed,
     Failed,
+    /// Stopped by `_goose/unstable/session/subagent/cancel`.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

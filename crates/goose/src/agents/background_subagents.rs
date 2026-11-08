@@ -114,6 +114,21 @@ impl BackgroundSubagents {
         );
     }
 
+    /// Stops one running background subagent of a parent session; false when none is
+    /// running under that id there. Its end goes out as `Finished(Cancelled)`.
+    pub fn cancel(&self, parent_session_id: &str, subagent_id: &str) -> bool {
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        match state.running.get(subagent_id) {
+            Some((parent, cancel)) if parent == parent_session_id => {
+                cancel.cancel();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Stops the background subagents of a parent session when it is closed. A running
     /// subagent holds the parent's agent, so nothing else would end it.
     pub fn cancel_for_parent(&self, parent_session_id: &str) {
@@ -124,5 +139,34 @@ impl BackgroundSubagents {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_stops_only_the_named_subagent_of_its_parent() {
+        let subagents = BackgroundSubagents::default();
+        let first = CancellationToken::new();
+        let second = CancellationToken::new();
+        {
+            let mut state = subagents.state.lock().unwrap();
+            state
+                .running
+                .insert("sub-1".into(), ("parent".into(), first.clone()));
+            state
+                .running
+                .insert("sub-2".into(), ("parent".into(), second.clone()));
+        }
+
+        assert!(!subagents.cancel("other-parent", "sub-1"));
+        assert!(!subagents.cancel("parent", "unknown"));
+        assert!(!first.is_cancelled());
+
+        assert!(subagents.cancel("parent", "sub-1"));
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
     }
 }

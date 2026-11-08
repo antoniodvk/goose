@@ -241,6 +241,21 @@ pub struct SteerSessionResponse {
     pub message_id: String,
 }
 
+/// Stop one background subagent (`delegate` with `run_in_background`) of a
+/// session, leaving the session and its other subagents running (N797). Its end
+/// arrives as `subagent_finished` with outcome `cancelled`. Fails with
+/// invalid params when that subagent is not running in the session.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
+#[request(
+    method = "_goose/unstable/session/subagent/cancel",
+    response = EmptyResponse
+)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelSubagentRequest {
+    pub session_id: String,
+    pub subagent_id: String,
+}
+
 /// Ask whether a new or existing chat can enter direct Live voice.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
 #[request(

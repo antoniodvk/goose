@@ -66,6 +66,11 @@
       "responseType": "SteerSessionResponse_unstable"
     },
     {
+      "method": "_goose/unstable/session/subagent/cancel",
+      "requestType": "CancelSubagentRequest_unstable",
+      "responseType": "EmptyResponse"
+    },
+    {
       "method": "_goose/unstable/session/live-voice/availability",
       "requestType": "LiveVoiceAvailabilityRequest_unstable",
       "responseType": "LiveVoiceAvailabilityResponse_unstable"

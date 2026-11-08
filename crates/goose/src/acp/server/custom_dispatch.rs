@@ -134,6 +134,14 @@ impl GooseAcpAgent {
         self.on_steer_session(req).await
     }
 
+    #[custom_method(CancelSubagentRequest)]
+    async fn dispatch_cancel_subagent(
+        &self,
+        req: CancelSubagentRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        self.on_cancel_subagent(req).await
+    }
+
     #[custom_method(LiveVoiceAvailabilityRequest)]
     async fn dispatch_live_voice_availability(
         &self,

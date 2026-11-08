@@ -1299,6 +1299,24 @@
       "x-side": "agent",
       "x-method": "_goose/unstable/session/steer"
     },
+    "CancelSubagentRequest_unstable": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "subagentId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "subagentId"
+      ],
+      "description": "Stop one background subagent (`delegate` with `run_in_background`) of a\nsession, leaving the session and its other subagents running (N797). Its end\narrives as `subagent_finished` with outcome `cancelled`. Fails with\ninvalid params when that subagent is not running in the session.",
+      "x-side": "agent",
+      "x-method": "_goose/unstable/session/subagent/cancel"
+    },
     "LiveVoiceAvailabilityRequest_unstable": {
       "type": "object",
       "properties": {
@@ -7224,10 +7242,19 @@
       ]
     },
     "SubagentFinishedOutcome": {
-      "type": "string",
-      "enum": [
-        "completed",
-        "failed"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "completed",
+            "failed"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "cancelled",
+          "description": "Stopped by `_goose/unstable/session/subagent/cancel`."
+        }
       ]
     },
     "SubagentFinishedUpdate": {
@@ -7245,7 +7272,7 @@
         },
         "text": {
           "type": "string",
-          "description": "Completed: the subagent's report. Failed: why it failed."
+          "description": "Completed: the subagent's report. Failed: why it failed. Cancelled: empty."
         }
       },
       "required": [
@@ -7463,6 +7490,15 @@
                   ],
                   "description": "Params for _goose/unstable/session/steer",
                   "title": "SteerSessionRequest_unstable"
+                },
+                {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/CancelSubagentRequest_unstable"
+                    }
+                  ],
+                  "description": "Params for _goose/unstable/session/subagent/cancel",
+                  "title": "CancelSubagentRequest_unstable"
                 },
                 {
                   "allOf": [
