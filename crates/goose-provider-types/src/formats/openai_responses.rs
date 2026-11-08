@@ -443,8 +443,8 @@ pub fn stamp_replay_model(message: &mut Message, model_name: &str) {
 }
 
 /// Sends the `phase` of the assistant text before a tool call back with that
-/// text, as OpenAI asks for when `store` is false. Reasoning items stay out:
-/// this request does not ask for them (`include`), so none are stored.
+/// text, as OpenAI asks for when `store` is false. Stored reasoning items are
+/// not replayed here; only `chatgpt_codex` sends them back.
 fn add_message_items(
     input_items: &mut Vec<Value>,
     messages: &[Message],
@@ -1878,7 +1878,7 @@ mod tests {
         assert!(input[2].get("phase").is_none());
         assert!(
             input.iter().all(|item| item["type"] != "reasoning"),
-            "no reasoning without include"
+            "this format does not replay reasoning"
         );
         Ok(())
     }
