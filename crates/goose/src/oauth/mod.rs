@@ -25,6 +25,10 @@ const CALLBACK_TEMPLATE: &str = include_str!("oauth_callback.html");
 const CLIENT_METADATA_URL: &str = "https://goose-docs.ai/oauth/client-metadata.json";
 const DEFAULT_OAUTH_CALLBACK_TIMEOUT_SECS: u64 = 300;
 const OAUTH_CALLBACK_TIMEOUT_ENV: &str = "GOOSE_OAUTH_CALLBACK_TIMEOUT_SECONDS";
+/// Set by a client that signs in on another device: no browser on this machine,
+/// the authorization address goes to stderr as one line with a fixed prefix.
+const OAUTH_NO_BROWSER_ENV: &str = "GOOSE_OAUTH_NO_BROWSER";
+const AUTHORIZATION_URL_PREFIX: &str = "goose-oauth-authorization-url: ";
 
 /// Pre-registered OAuth client supplied by a probe script, for servers whose
 /// authorization server supports neither Dynamic Client Registration nor
@@ -81,6 +85,10 @@ fn announce_authorization_url(name: &str, authorization_url: &str) {
         "If the browser did not open, authorize {} at:\n  {}",
         name, authorization_url
     );
+}
+
+fn authorization_url_line(authorization_url: &str) -> String {
+    format!("{AUTHORIZATION_URL_PREFIX}{authorization_url}")
 }
 
 async fn complete_automatic_authorization(
@@ -468,12 +476,22 @@ pub async fn oauth_flow_with_challenge(
         {
             Ok(callback_url)
         } else {
-            announce_authorization_url(name, authorization_url.as_str());
-            if let Err(e) = webbrowser::open(authorization_url.as_str()) {
-                warn!(
-                    "[OAuth:{}] Failed to open browser automatically: {}",
-                    name, e
+            if std::env::var_os(OAUTH_NO_BROWSER_ENV).is_some() {
+                // Signed in from another device (the phone app via the app server):
+                // the client opens the address there, this machine's browser stays closed.
+                tracing::info!(
+                    "[OAuth:{}] waiting for the callback, browser not opened",
+                    name
                 );
+                eprintln!("{}", authorization_url_line(authorization_url.as_str()));
+            } else {
+                announce_authorization_url(name, authorization_url.as_str());
+                if let Err(e) = webbrowser::open(authorization_url.as_str()) {
+                    warn!(
+                        "[OAuth:{}] Failed to open browser automatically: {}",
+                        name, e
+                    );
+                }
             }
             wait_for_callback(
                 callback_receiver,
@@ -542,6 +560,15 @@ mod tests {
         assert_eq!(
             resolve_oauth_callback_timeout(Some("42")),
             Duration::from_secs(42)
+        );
+    }
+
+    #[test]
+    fn authorization_url_line_has_fixed_prefix_and_whole_url() {
+        let url = "https://login.example/authorize?client_id=a&state=b c";
+        assert_eq!(
+            authorization_url_line(url),
+            format!("goose-oauth-authorization-url: {url}")
         );
     }
 
