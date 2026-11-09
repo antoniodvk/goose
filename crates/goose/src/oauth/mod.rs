@@ -25,8 +25,9 @@ const CALLBACK_TEMPLATE: &str = include_str!("oauth_callback.html");
 const CLIENT_METADATA_URL: &str = "https://goose-docs.ai/oauth/client-metadata.json";
 const DEFAULT_OAUTH_CALLBACK_TIMEOUT_SECS: u64 = 300;
 const OAUTH_CALLBACK_TIMEOUT_ENV: &str = "GOOSE_OAUTH_CALLBACK_TIMEOUT_SECONDS";
-/// Set by a client that signs in on another device: no browser on this machine,
-/// the authorization address goes to stderr as one line with a fixed prefix.
+/// Set by a client that signs in on another device: no browser on this machine and
+/// no automatic callback, the authorization address goes to stderr as one line with
+/// a fixed prefix.
 const OAUTH_NO_BROWSER_ENV: &str = "GOOSE_OAUTH_NO_BROWSER";
 const AUTHORIZATION_URL_PREFIX: &str = "goose-oauth-authorization-url: ";
 
@@ -471,36 +472,36 @@ pub async fn oauth_flow_with_challenge(
 
     let authorization_url = oauth_state.get_authorization_url().await?;
     let callback_url = async {
-        if let Some(callback_url) =
+        if std::env::var_os(OAUTH_NO_BROWSER_ENV).is_some() {
+            // Signed in from another device (the phone app via the app server): the
+            // client opens the address there, this machine's browser stays closed.
+            // Takes precedence over GOOSE_OAUTH_AUTOMATIC_CALLBACK, which the app
+            // server sets on every goose, so a goose without this change fails closed.
+            tracing::info!(
+                "[OAuth:{}] waiting for the callback, browser not opened",
+                name
+            );
+            eprintln!("{}", authorization_url_line(authorization_url.as_str()));
+        } else if let Some(callback_url) =
             complete_automatic_authorization(authorization_url.as_str(), &redirect_uri).await?
         {
-            Ok(callback_url)
+            return Ok(callback_url);
         } else {
-            if std::env::var_os(OAUTH_NO_BROWSER_ENV).is_some() {
-                // Signed in from another device (the phone app via the app server):
-                // the client opens the address there, this machine's browser stays closed.
-                tracing::info!(
-                    "[OAuth:{}] waiting for the callback, browser not opened",
-                    name
+            announce_authorization_url(name, authorization_url.as_str());
+            if let Err(e) = webbrowser::open(authorization_url.as_str()) {
+                warn!(
+                    "[OAuth:{}] Failed to open browser automatically: {}",
+                    name, e
                 );
-                eprintln!("{}", authorization_url_line(authorization_url.as_str()));
-            } else {
-                announce_authorization_url(name, authorization_url.as_str());
-                if let Err(e) = webbrowser::open(authorization_url.as_str()) {
-                    warn!(
-                        "[OAuth:{}] Failed to open browser automatically: {}",
-                        name, e
-                    );
-                }
             }
-            wait_for_callback(
-                callback_receiver,
-                oauth_callback_timeout(),
-                name,
-                authorization_url.as_str(),
-            )
-            .await
         }
+        wait_for_callback(
+            callback_receiver,
+            oauth_callback_timeout(),
+            name,
+            authorization_url.as_str(),
+        )
+        .await
     }
     .await;
     server_handle.abort();
