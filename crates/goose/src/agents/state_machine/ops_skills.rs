@@ -87,8 +87,21 @@ const CLAUDE_CHARS_PER_TOKEN: f64 = 4.0;
 const CLAUDE_FALLBACK_WINDOW: usize = 200_000;
 const CLAUDE_MAX_DESC_CHARS: usize = 1536;
 
-fn listing_rules() -> Option<ListingRules> {
-    let raw = std::env::var("GOOSE_SKILL_LISTING").ok()?;
+/// The project's overrides differ per folder, so the App server also writes the rules of a chat
+/// folder to `skill-listing.json` in that folder's config (`Paths::folder_config_dir`, C246);
+/// the variable holds those of the process's folder.
+fn listing_rules(working_dir: &Path) -> Option<ListingRules> {
+    let mut raw = std::env::var("GOOSE_SKILL_LISTING").ok()?;
+    if let Some(dir) = crate::config::paths::Paths::folder_config_dir(working_dir) {
+        match std::fs::read_to_string(dir.join("skill-listing.json")) {
+            Ok(text) => raw = text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                "skill-listing.json of {} unreadable: {error}",
+                dir.display()
+            ),
+        }
+    }
     match serde_json::from_str(&raw) {
         Ok(rules) => Some(rules),
         Err(error) => {
@@ -198,7 +211,7 @@ fn skill_instructions(session: &Session) -> Option<String> {
         })
         .collect();
     skills.sort_by(|a, b| (&a.name, &a.path).cmp(&(&b.name, &b.path)));
-    let rules = listing_rules();
+    let rules = listing_rules(&session.working_dir);
     let mode = |name: &str| {
         rules
             .as_ref()

@@ -4,7 +4,8 @@
 //! follow symbolic links, so a link into a profile or secrets folder is not searched.
 //!
 //! Read rules from Claude Code's `permissions.deny` also apply here: the files named in
-//! `GOOSE_READ_DENY_FILES` (JSON list of settings.json paths) are read on every call, and files
+//! `GOOSE_READ_DENY_FILES` (JSON list of settings.json paths) and, when it is set, the working
+//! folder's `.claude/settings.json` and `settings.local.json` are read on every call, and files
 //! matching a `Read(...)` rule are left out of the results. If a listed file cannot be read, the
 //! search refuses to run (fail closed).
 
@@ -120,12 +121,23 @@ fn success(text: impl Into<String>) -> CallToolResult {
 struct DenyList(Vec<Regex>);
 
 impl DenyList {
-    fn load() -> Result<Self, String> {
+    /// The listed files, then the project settings of the chat's working folder
+    /// (`.claude/settings.json` and `settings.local.json`, where they exist), as the server
+    /// checks them for that folder (server/code-chats.mjs › projectSettings, C246).
+    fn load(working_dir: &Path) -> Result<Self, String> {
         let Ok(raw) = std::env::var(READ_DENY_FILES_ENV) else {
             return Ok(Self(Vec::new()));
         };
-        let files: Vec<String> = serde_json::from_str(&raw)
+        let mut files: Vec<String> = serde_json::from_str(&raw)
             .map_err(|e| format!("{READ_DENY_FILES_ENV} is not a JSON list of paths: {e}"))?;
+        for name in ["settings.json", "settings.local.json"] {
+            let file = working_dir.join(".claude").join(name);
+            let text = file.to_string_lossy().to_string();
+            let listed = files.iter().any(|f| f.eq_ignore_ascii_case(&text));
+            if !listed && file.exists() {
+                files.push(text);
+            }
+        }
         let mut patterns = Vec::new();
         for file in files {
             let text = fs::read_to_string(&file)
@@ -350,7 +362,7 @@ impl SearchTools {
         if !root.exists() {
             return error(format!("Path does not exist: {}", root.display()));
         }
-        let deny = match DenyList::load() {
+        let deny = match DenyList::load(&base) {
             Ok(deny) => deny,
             Err(e) => return error(format!("Search refused: {e}")),
         };
@@ -472,7 +484,7 @@ impl SearchTools {
         if !root.is_dir() {
             return error(format!("Not a directory: {}", root.display()));
         }
-        let deny = match DenyList::load() {
+        let deny = match DenyList::load(&base) {
             Ok(deny) => deny,
             Err(e) => return error(format!("Search refused: {e}")),
         };
@@ -765,6 +777,26 @@ mod tests {
         let list = DenyList(vec![deny_regex("**/.env").unwrap()]);
         assert!(list.denies(Path::new(r"C:\project\.env")));
         assert!(!list.denies(Path::new(r"C:\project\.env.example")));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_working_folders_project_settings_deny_too() {
+        let dir = setup();
+        fs::write(
+            dir.path().join(".claude/settings.local.json"),
+            r#"{"permissions":{"deny":["Read(**/b.mjs)"]}}"#,
+        )
+        .unwrap();
+        let before = text(&grep(dir.path(), serde_json::json!({ "pattern": "alpha" })));
+        assert!(before.contains("b.mjs"), "{before}");
+        std::env::set_var(READ_DENY_FILES_ENV, "[]");
+        let after = text(&grep(dir.path(), serde_json::json!({ "pattern": "alpha" })));
+        std::env::remove_var(READ_DENY_FILES_ENV);
+        assert!(
+            !after.contains("b.mjs") && after.contains("a.rs"),
+            "{after}"
+        );
     }
 
     #[cfg(windows)]

@@ -386,9 +386,11 @@ fn claude_skill_dirs(
 
     // Plugin skills and commands, as Claude Code shows them: skills named
     // `<plugin>:<skill>`, commands by the `name` the App server writes, which a folder
-    // cannot hold on Windows. Both are set up on each start of the code process
-    // (`server/code-chats.mjs` › `syncPlugins`).
-    for (path, plugin) in claude_plugin_skill_dirs() {
+    // cannot hold on Windows. Both depend on the project folder (its enabled plugins and
+    // commands); the App server writes them per chat folder (`server/code-chats.mjs` ›
+    // `syncPlugins`, `codeOrdnerSync`).
+    let plugin_config = Paths::config_dir_for(working_dir);
+    for (path, plugin) in claude_plugin_skill_dirs(&plugin_config) {
         dirs.push(SkillDirectory {
             path,
             is_global: true,
@@ -399,7 +401,7 @@ fn claude_skill_dirs(
         });
     }
     dirs.push(SkillDirectory {
-        path: Paths::config_dir().join("skills").join("befehle"),
+        path: plugin_config.join("skills").join("befehle"),
         is_global: true,
         writable: true,
         preserve_path: false,
@@ -450,8 +452,8 @@ fn project_skill_dirs(working_dir: &Path, home: Option<&Path>) -> Vec<PathBuf> {
 
 /// Skill folders of the plugins Claude Code has installed; the App links each plugin's
 /// `skills` folder here under the plugin's name (`server/code-chats.mjs` › `syncPlugins`).
-fn claude_plugin_skill_dirs() -> Vec<(PathBuf, String)> {
-    let plugins = Paths::config_dir().join("skills").join("plugins");
+fn claude_plugin_skill_dirs(config_dir: &Path) -> Vec<(PathBuf, String)> {
+    let plugins = config_dir.join("skills").join("plugins");
     let Ok(entries) = std::fs::read_dir(plugins) else {
         return Vec::new();
     };

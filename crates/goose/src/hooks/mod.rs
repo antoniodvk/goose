@@ -419,9 +419,23 @@ pub struct HookManager {
 }
 
 impl HookManager {
-    /// Build a manager by scanning all enabled plugins for `hooks/hooks.json`.
+    /// Build a manager by scanning all enabled plugins for `hooks/hooks.json`. When the Goose
+    /// App wrote a copy of the user plugins for this project folder
+    /// (`<folder config>/.agents/plugins`, `Paths::folder_config_dir`, C246), that copy stands
+    /// in for the user plugin folder, because the hooks it translates from Claude Code depend on
+    /// the folder's settings and enabled plugins.
     pub fn load(project_root: Option<&Path>) -> Self {
-        let plugins = discover_enabled_plugins(project_root);
+        let folder_plugins = project_root
+            .and_then(crate::config::paths::Paths::folder_config_dir)
+            .map(|dir| dir.join(".agents").join("plugins"));
+        let plugins = match folder_plugins {
+            Some(dir) => crate::plugins::discovery::discover_enabled_plugins_in(
+                project_root,
+                &dir,
+                crate::config::Config::global(),
+            ),
+            None => discover_enabled_plugins(project_root),
+        };
         Self::from_plugins(plugins)
     }
 
@@ -2069,6 +2083,40 @@ mod tests {
         )
         .await;
         assert_eq!(lines(), 1, "a non-matching tool must not run the hook");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_folders_copy_stands_in_for_the_user_plugins() {
+        let root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let stop = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"true"}]}]}}"#;
+        let prompt =
+            r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"true"}]}]}}"#;
+        write_plugin(
+            &root.path().join(".agents").join("plugins"),
+            "claude-code",
+            stop,
+        );
+        let folder = root
+            .path()
+            .join("config")
+            .join("ordner")
+            .join(crate::config::paths::folder_key(project.path()));
+        write_plugin(
+            &folder.join(".agents").join("plugins"),
+            "claude-code",
+            prompt,
+        );
+        std::env::set_var("GOOSE_PATH_ROOT", root.path());
+        let in_project = HookManager::load(Some(project.path()));
+        let elsewhere = HookManager::load(Some(other.path()));
+        std::env::remove_var("GOOSE_PATH_ROOT");
+        assert!(in_project.has_hooks(HookEvent::UserPromptSubmit));
+        assert!(!in_project.has_hooks(HookEvent::Stop));
+        assert!(elsewhere.has_hooks(HookEvent::Stop));
+        assert!(!elsewhere.has_hooks(HookEvent::UserPromptSubmit));
     }
 
     #[test]

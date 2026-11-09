@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -214,7 +215,11 @@ pub struct Agent {
     tool_confirmation_coordinator: ToolConfirmationCoordinator,
 
     pub(super) tool_inspection_manager: ToolInspectionManager,
-    pub(super) hook_manager: crate::hooks::HookManager,
+    /// Hooks of the folder the session works in (C246): loaded for its working directory on
+    /// first use and again when that changes (`hooks_for`).
+    hook_manager: std::sync::Mutex<(Option<PathBuf>, crate::hooks::HookManager)>,
+    #[cfg(test)]
+    hook_manager_fixed: bool,
     #[cfg(test)]
     pub(super) stop_hook_block_cap_override: Option<u32>,
     steer_queues: Mutex<HashMap<String, SteerQueue>>,
@@ -293,7 +298,9 @@ impl Agent {
                 providers,
                 inspection_session_manager,
             ),
-            hook_manager: crate::hooks::HookManager::load(std::env::current_dir().ok().as_deref()),
+            hook_manager: std::sync::Mutex::new((None, crate::hooks::HookManager::default())),
+            #[cfg(test)]
+            hook_manager_fixed: false,
             #[cfg(test)]
             stop_hook_block_cap_override: None,
             steer_queues: Mutex::new(HashMap::new()),
@@ -312,7 +319,9 @@ impl Agent {
         self: &mut Arc<Self>,
         hook_manager: crate::hooks::HookManager,
     ) {
-        Arc::get_mut(self).expect("agent is shared").hook_manager = hook_manager;
+        let agent = Arc::get_mut(self).expect("agent is shared");
+        agent.hook_manager = std::sync::Mutex::new((None, hook_manager));
+        agent.hook_manager_fixed = true;
     }
 
     #[cfg(test)]
@@ -329,11 +338,49 @@ impl Agent {
             .stop_hook_block_cap_override = Some(cap);
     }
 
+    /// Hooks for a session working in `working_dir`: the plugins of that folder (project
+    /// `.agents/plugins`, its settings, and the folder's copy written by the Goose App,
+    /// `HookManager::load`), not of the process's directory, which a session does not share.
+    fn hooks_for(&self, working_dir: &Path) -> crate::hooks::HookManager {
+        let mut slot = self
+            .hook_manager
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        #[cfg(test)]
+        if self.hook_manager_fixed {
+            return slot.1.clone();
+        }
+        if slot.0.as_deref() != Some(working_dir) {
+            *slot = (
+                Some(working_dir.to_path_buf()),
+                crate::hooks::HookManager::load(Some(working_dir)),
+            );
+        }
+        slot.1.clone()
+    }
+
+    async fn session_hooks(&self, session_id: &str) -> crate::hooks::HookManager {
+        match self
+            .config
+            .session_manager
+            .get_session(session_id, false)
+            .await
+        {
+            Ok(session) => self.hooks_for(&session.working_dir),
+            Err(error) => {
+                warn!(%error, "No session for hooks; using the process directory");
+                let dir = std::env::current_dir().unwrap_or_default();
+                self.hooks_for(&dir)
+            }
+        }
+    }
+
     pub async fn emit_hook(&self, event: crate::hooks::HookEvent, session_id: &str) {
-        if !self.hook_manager.has_hooks(event) {
+        let hook_manager = self.session_hooks(session_id).await;
+        if !hook_manager.has_hooks(event) {
             return;
         }
-        self.hook_manager
+        hook_manager
             .emit(event, crate::hooks::HookContext::new(event, session_id))
             .await;
     }
@@ -342,11 +389,11 @@ impl Agent {
     /// banners, which the client shows before the first prompt.
     pub async fn emit_session_start(&self, session_id: &str) -> Result<Vec<String>> {
         let event = crate::hooks::HookEvent::SessionStart;
-        if !self.hook_manager.has_hooks(event) {
+        let hook_manager = self.session_hooks(session_id).await;
+        if !hook_manager.has_hooks(event) {
             return Ok(Vec::new());
         }
-        let banners = self
-            .hook_manager
+        let banners = hook_manager
             .emit_collecting_banners(event, crate::hooks::HookContext::new(event, session_id))
             .await;
         self.config
@@ -662,6 +709,7 @@ impl Agent {
         session_config: SessionConfig,
         cancel: CancellationToken,
         steer_queue: SteerQueue,
+        hook_manager: crate::hooks::HookManager,
     ) -> StateMachine<'_, Session, GooseEffect> {
         let max_turns = session_config
             .max_turns
@@ -747,7 +795,7 @@ impl Agent {
             extension_manager: Arc::clone(&self.extension_manager),
             extension_lease,
             tool_inspection_manager: &self.tool_inspection_manager,
-            hook_manager: self.hook_manager.clone(),
+            hook_manager,
             steer_queue,
             subagent_runner: ForegroundSubagentRunner::new(Arc::clone(self)),
             retry_timeout: std::time::Duration::from_secs(retry_timeout),
@@ -1041,6 +1089,7 @@ impl Agent {
             crate::context_limit::get_context_limit(provider.as_ref(), &model_config.model_name)
                 .await?;
         let steer_queue = self.steer_queue(&session_id).await;
+        let hook_manager = self.hooks_for(&session.working_dir);
         let machine = self
             .create_state_machine(
                 provider,
@@ -1049,6 +1098,7 @@ impl Agent {
                 session_config,
                 cancel.clone(),
                 steer_queue,
+                hook_manager.clone(),
             )
             .await;
         let reply_span = tracing::Span::current();
@@ -1063,7 +1113,7 @@ impl Agent {
                         run_goose(
                             &machine,
                             session_manager.as_ref(),
-                            &self.hook_manager,
+                            &hook_manager,
                             &session_id,
                             &emit,
                         ),

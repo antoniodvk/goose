@@ -57,8 +57,17 @@ pub(crate) fn discover_enabled_plugins_with_config(
     project_root: Option<&Path>,
     config: &Config,
 ) -> Vec<DiscoveredPlugin> {
+    discover_enabled_plugins_in(project_root, &plugin_install_dir(), config)
+}
+
+/// Like `discover_enabled_plugins`, with `user_plugins_dir` in place of the user plugin folder.
+pub(crate) fn discover_enabled_plugins_in(
+    project_root: Option<&Path>,
+    user_plugins_dir: &Path,
+    config: &Config,
+) -> Vec<DiscoveredPlugin> {
     let scoped_settings = load_all_settings(project_root);
-    let user_plugins_dir = plugin_install_dir();
+    let user_plugins_dir = user_plugins_dir.to_path_buf();
     let mut found = Vec::new();
 
     if let Some(root) = project_root {

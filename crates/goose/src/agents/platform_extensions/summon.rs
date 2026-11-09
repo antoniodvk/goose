@@ -362,7 +362,8 @@ pub fn discover_filesystem_sources(working_dir: &Path) -> Vec<SourceEntry> {
     let global_agent_dirs: Vec<PathBuf> = [
         home.as_ref().map(|h| h.join(".goose/agents")),
         home.as_ref().map(|h| h.join(".agents/agents")),
-        Some(config.join("agents")),
+        // plugin agents depend on the folder's enabled plugins (Goose App, C246)
+        Some(Paths::config_dir_for(Some(working_dir)).join("agents")),
         home.as_ref().map(|h| h.join(".claude/agents")),
     ]
     .into_iter()

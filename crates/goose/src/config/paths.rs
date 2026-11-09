@@ -1,6 +1,6 @@
 use etcetera::{choose_app_strategy, AppStrategy, AppStrategyArgs};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Paths;
 
@@ -84,6 +84,48 @@ impl Paths {
     pub fn in_data_dir(subpath: &str) -> PathBuf {
         Self::data_dir().join(subpath)
     }
+
+    /// The Goose App writes what Claude Code sets per project folder (plugin skills,
+    /// commands, plugin agents, hooks, skill listing rules) for each folder a code chat
+    /// works in to `<config>/ordner/<key>` (`server/code-chats.mjs` › `codeOrdnerSync`),
+    /// laid out like the profile itself. `None` when there is none for this folder; the
+    /// caller then reads the profile's own copies, written for the process's folder.
+    pub fn folder_config_dir(working_dir: &Path) -> Option<PathBuf> {
+        let dir = Self::config_dir()
+            .join("ordner")
+            .join(folder_key(working_dir));
+        dir.is_dir().then_some(dir)
+    }
+
+    /// `folder_config_dir`, else the profile's config folder.
+    pub fn config_dir_for(working_dir: Option<&Path>) -> PathBuf {
+        working_dir
+            .and_then(Self::folder_config_dir)
+            .unwrap_or_else(Self::config_dir)
+    }
+}
+
+/// Claude Code's project folder name (every character that is not an ASCII letter or digit
+/// becomes `-`, one per UTF-16 unit as in JavaScript), lower case so that the drive letter's
+/// case does not matter, trailing separators dropped. Must match `server/code-chats.mjs` ›
+/// `codeOrdnerKey`.
+pub fn folder_key(working_dir: &Path) -> String {
+    let text = working_dir.to_string_lossy();
+    let trimmed = text.trim_end_matches(['\\', '/']);
+    let trimmed = if trimmed.is_empty() {
+        text.as_ref()
+    } else {
+        trimmed
+    };
+    let mut key = String::with_capacity(trimmed.len());
+    for c in trimmed.chars() {
+        if c.is_ascii_alphanumeric() {
+            key.push(c.to_ascii_lowercase());
+        } else {
+            key.extend(std::iter::repeat_n('-', c.len_utf16()));
+        }
+    }
+    key
 }
 
 enum DirType {
@@ -97,8 +139,18 @@ enum DirType {
 
 #[cfg(test)]
 mod tests {
-    use super::Paths;
+    use super::{folder_key, Paths};
     use std::ffi::OsString;
+    use std::path::Path;
+
+    #[test]
+    fn folder_key_matches_the_app_server() {
+        assert_eq!(
+            folder_key(Path::new(r"C:\Users\anton\Goose-App\goose-native\")),
+            "c--users-anton-goose-app-goose-native"
+        );
+        assert_eq!(folder_key(Path::new("c:/Pers\u{f6}nlich")), "c--pers-nlich");
+    }
 
     #[test]
     fn path_root_requires_an_absolute_path() {
