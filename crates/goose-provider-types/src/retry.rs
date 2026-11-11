@@ -64,6 +64,98 @@ pub fn notify_retry(attempt: usize, max_retries: usize, delay: Duration, error: 
     let _ = (attempt, max_retries, delay, reason);
 }
 
+/// A provider has left a request unanswered for `waited`. `answered` marks the
+/// answer that finally arrived after at least one such notice.
+#[derive(Debug, Clone)]
+pub struct WaitNotice {
+    pub provider: String,
+    pub waited: Duration,
+    pub answered: bool,
+}
+
+pub type WaitNoticeFn = std::sync::Arc<dyn Fn(&WaitNotice) + Send + Sync>;
+
+pub const WAIT_NOTICE_AFTER: Duration = Duration::from_secs(30);
+pub const WAIT_NOTICE_EVERY: Duration = Duration::from_secs(10);
+
+#[cfg(not(target_arch = "wasm32"))]
+tokio::task_local! {
+    /// Set by the ACP server for the duration of a turn so a silent provider
+    /// becomes visible to the client.
+    static WAIT_NOTICE: WaitNoticeFn;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn with_wait_notice<F>(notify: WaitNoticeFn, fut: F) -> F::Output
+where
+    F: Future,
+{
+    WAIT_NOTICE.scope(notify, fut).await
+}
+
+/// Awaits a provider request and reports to the turn's listener while it stays
+/// unanswered: first after [`WAIT_NOTICE_AFTER`], then every [`WAIT_NOTICE_EVERY`].
+/// The request itself is never cut short.
+pub async fn notify_while_waiting<T, E, F>(provider: &str, fut: F) -> Result<T, E>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    notify_while_waiting_every(provider, WAIT_NOTICE_AFTER, WAIT_NOTICE_EVERY, fut).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn notify_while_waiting_every<T, E, F>(
+    provider: &str,
+    after: Duration,
+    every: Duration,
+    fut: F,
+) -> Result<T, E>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    let send = |waited: Duration, answered: bool| {
+        let _ = WAIT_NOTICE.try_with(|notify| {
+            notify(&WaitNotice {
+                provider: provider.to_string(),
+                waited,
+                answered,
+            })
+        });
+    };
+    let started = tokio::time::Instant::now();
+    let mut fut = std::pin::pin!(fut);
+    let mut waited = after;
+    let mut notified = false;
+    loop {
+        match tokio::time::timeout_at(started + waited, fut.as_mut()).await {
+            Ok(result) => {
+                if notified && result.is_ok() {
+                    send(started.elapsed(), true);
+                }
+                return result;
+            }
+            Err(_) => {
+                notified = true;
+                send(waited, false);
+                waited += every;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn notify_while_waiting_every<T, E, F>(
+    _provider: &str,
+    _after: Duration,
+    _every: Duration,
+    fut: F,
+) -> Result<T, E>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    fut.await
+}
+
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts
@@ -322,6 +414,65 @@ impl<P: Provider> ProviderRetry for P {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait_notices<F>(fut: F) -> (Result<u8, ()>, Vec<(u64, bool)>)
+    where
+        F: Future<Output = Result<u8, ()>>,
+    {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let notify: WaitNoticeFn = std::sync::Arc::new(move |notice: &WaitNotice| {
+            assert_eq!(notice.provider, "gcp_vertex_ai");
+            sink.lock()
+                .unwrap()
+                .push((notice.waited.as_millis() as u64, notice.answered));
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(with_wait_notice(
+            notify,
+            notify_while_waiting_every(
+                "gcp_vertex_ai",
+                Duration::from_millis(60),
+                Duration::from_millis(40),
+                fut,
+            ),
+        ));
+        let seen = seen.lock().unwrap().clone();
+        (result, seen)
+    }
+
+    #[test]
+    fn quick_answer_sends_no_wait_notice() {
+        let (result, seen) = wait_notices(async { Ok(1) });
+        assert_eq!(result, Ok(1));
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn silent_provider_is_reported_until_it_answers() {
+        let (result, seen) = wait_notices(async {
+            sleep(Duration::from_millis(130)).await;
+            Ok(1)
+        });
+        assert_eq!(result, Ok(1));
+        assert_eq!(seen[..2], [(60, false), (100, false)]);
+        let (waited, answered) = *seen.last().unwrap();
+        assert!(answered && waited >= 130);
+        assert_eq!(seen.len(), 3);
+    }
+
+    #[test]
+    fn late_error_is_not_reported_as_an_answer() {
+        let (result, seen) = wait_notices(async {
+            sleep(Duration::from_millis(80)).await;
+            Err(())
+        });
+        assert_eq!(result, Err(()));
+        assert_eq!(seen, [(60, false)]);
+    }
 
     #[test]
     fn default_config_retries_request_failed() {
