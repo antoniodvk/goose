@@ -456,6 +456,73 @@ impl DatabricksProvider {
             })
     }
 
+    /// The endpoint metadata `stream` already resolved, without a lookup.
+    fn cached_endpoint_info(&self, endpoint_name: &str) -> Option<DatabricksEndpointInfo> {
+        let cache_key = format!("{}:{}", self.host, endpoint_name);
+        DATABRICKS_ENDPOINT_INFO_CACHE
+            .lock()
+            .unwrap()
+            .get(&cache_key)
+            .filter(|cached| cached.applies_to(EndpointMetadataLookup::InferenceRouting))
+            .and_then(|cached| cached.info.clone())
+    }
+
+    /// The request body before transport fields, shared by `stream` and the
+    /// effort menu (N785) so the menu offers what the request sends.
+    #[allow(clippy::too_many_arguments)]
+    fn request_body(
+        model_config: &ModelConfig,
+        endpoint_name: &str,
+        effective_model_name: &str,
+        is_responses_model: bool,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+        image_format: &ImageFormat,
+    ) -> Result<Value, ProviderError> {
+        if is_responses_model {
+            let mut request_model_config = model_config.clone();
+            request_model_config.model_name = effective_model_name.to_string();
+            let mut payload =
+                create_responses_request(&request_model_config, system, messages, tools)?;
+            payload["model"] = Value::String(endpoint_name.to_string());
+            if payload.get("reasoning").is_none() {
+                if let Some(effort) = model_config.thinking_effort().and_then(|effort| {
+                    openai_reasoning_effort_for_thinking(effective_model_name, effort)
+                }) {
+                    payload.as_object_mut().unwrap().insert(
+                        "reasoning".to_string(),
+                        json!({
+                            "effort": effort,
+                            "summary": "auto",
+                        }),
+                    );
+                }
+            }
+            return Ok(payload);
+        }
+
+        let mut request_model_config = model_config.clone();
+        if Self::is_claude_model(effective_model_name)
+            && !Self::is_claude_model(&model_config.model_name)
+        {
+            request_model_config.model_name = effective_model_name.to_string();
+        }
+        let mut payload = create_request_for_provider(
+            DATABRICKS_PROVIDER_NAME,
+            &request_model_config,
+            system,
+            messages,
+            tools,
+            image_format,
+        )?;
+        payload
+            .as_object_mut()
+            .expect("payload should have model key")
+            .remove("model");
+        Ok(payload)
+    }
+
     async fn resolve_endpoint_info_cached(
         &self,
         endpoint_name: &str,
@@ -566,6 +633,37 @@ impl Provider for DatabricksProvider {
         &self.name
     }
 
+    /// The levels the request for this endpoint sends (N785), read off the
+    /// body `stream` builds, routed by the endpoint metadata it resolved.
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        let (endpoint_name, _) = extract_reasoning_effort(model_name);
+        let endpoint_info = self.cached_endpoint_info(&endpoint_name);
+        let effective_model_name = endpoint_info
+            .as_ref()
+            .and_then(|info| info.upstream_model_name.clone())
+            .unwrap_or_else(|| model_name.to_string());
+        let is_responses_model =
+            Self::uses_responses_api(endpoint_info.as_ref(), &[model_name, &effective_model_name]);
+        let model_config = ModelConfig::new(model_name).with_canonical_limits(&self.name);
+        let messages = [Message::user().with_text(".")];
+        Some(crate::formats::anthropic::thinking_levels_sent(
+            &model_config,
+            |config| {
+                Self::request_body(
+                    config,
+                    &endpoint_name,
+                    &effective_model_name,
+                    is_responses_model,
+                    "",
+                    &messages,
+                    &[],
+                    &self.image_format,
+                )
+                .ok()
+            },
+        ))
+    }
+
     fn retry_config(&self) -> RetryConfig {
         self.retry_config.clone()
     }
@@ -628,34 +726,18 @@ impl Provider for DatabricksProvider {
         };
         let client_request_id = self.build_client_request_id(&session_id);
 
+        let mut payload = Self::request_body(
+            model_config,
+            &endpoint_name,
+            effective_model_name,
+            is_responses_model,
+            system,
+            messages,
+            tools,
+            &self.image_format,
+        )?;
+
         if is_responses_model {
-            let responses_model_config;
-            let request_model_config = if effective_model_name != model_config.model_name {
-                responses_model_config = {
-                    let mut config = model_config.clone();
-                    config.model_name = effective_model_name.to_string();
-                    config
-                };
-                &responses_model_config
-            } else {
-                model_config
-            };
-            let mut payload =
-                create_responses_request(request_model_config, system, messages, tools)?;
-            payload["model"] = Value::String(endpoint_name.clone());
-            if payload.get("reasoning").is_none() {
-                if let Some(effort) = model_config.thinking_effort().and_then(|effort| {
-                    openai_reasoning_effort_for_thinking(effective_model_name, effort)
-                }) {
-                    payload.as_object_mut().unwrap().insert(
-                        "reasoning".to_string(),
-                        json!({
-                            "effort": effort,
-                            "summary": "auto",
-                        }),
-                    );
-                }
-            }
             payload["stream"] = Value::Bool(true);
             if let Some(ref client_request_id) = client_request_id {
                 payload["client_request_id"] = Value::String(client_request_id.clone());
@@ -682,32 +764,6 @@ impl Provider for DatabricksProvider {
 
             stream_responses_compat(response, log)
         } else {
-            let format_model_config;
-            let request_model_config = if Self::is_claude_model(effective_model_name)
-                && !Self::is_claude_model(&model_config.model_name)
-            {
-                format_model_config = {
-                    let mut config = model_config.clone();
-                    config.model_name = effective_model_name.to_string();
-                    config
-                };
-                &format_model_config
-            } else {
-                model_config
-            };
-
-            let mut payload = create_request_for_provider(
-                DATABRICKS_PROVIDER_NAME,
-                request_model_config,
-                system,
-                messages,
-                tools,
-                &self.image_format,
-            )?;
-            payload
-                .as_object_mut()
-                .expect("payload should have model key")
-                .remove("model");
             if let Some(client_request_id) = client_request_id {
                 payload["client_request_id"] = Value::String(client_request_id);
             }

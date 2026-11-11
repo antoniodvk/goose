@@ -648,8 +648,23 @@ impl Provider for GcpVertexAIProvider {
         &self.name
     }
 
-    /// Gemini 3+ thinking levels, which the Google request sends (N774).
+    /// Gemini 3+ thinking levels, which the Google request sends (N774);
+    /// Claude models offer the levels their request sends (N785).
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        let model_config = ModelConfig::new(model_name).with_canonical_limits(&self.name);
+        let messages = [Message::user().with_text(".")];
+        let is_claude = create_request(&model_config, "", &messages, &[])
+            .is_ok_and(|(_, context)| matches!(context.provider(), ModelProvider::Anthropic));
+        if is_claude {
+            return Some(crate::providers::formats::anthropic::thinking_levels_sent(
+                &model_config,
+                |config| {
+                    create_request(config, "", &messages, &[])
+                        .ok()
+                        .map(|(request, _)| request)
+                },
+            ));
+        }
         goose_providers::formats::google::gemini_reasoning_efforts(
             GCP_VERTEX_AI_PROVIDER_NAME,
             model_name,

@@ -371,9 +371,25 @@ impl Provider for AnthropicProvider {
         &self.name
     }
 
-    /// Adaptive models' catalog effort levels, which the request sends (N774).
+    /// The levels the request for this model sends (N774, N785), read off the
+    /// payload `stream` builds: adaptive levels, budgets, declared params.
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
-        crate::formats::anthropic::declared_reasoning_efforts(&self.name, model_name)
+        let model_config = ModelConfig::new(model_name).with_canonical_limits(&self.name);
+        let messages = [Message::user().with_text(".")];
+        Some(crate::formats::anthropic::thinking_levels_sent(
+            &model_config,
+            |config| {
+                self.streaming_payload(
+                    config,
+                    model_name,
+                    "",
+                    &messages,
+                    &[],
+                    self.format_options.clone(),
+                )
+                .ok()
+            },
+        ))
     }
 
     async fn refresh_credentials(&self) -> Result<(), ProviderError> {

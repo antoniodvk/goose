@@ -710,9 +710,11 @@ fn test_config_option_thinking_effort_set() {
             <AcpServerConnection as Connection>::expected_session_id(),
         )
         .await;
+        // The OpenAI provider offers the levels its request sends (N783): a
+        // Claude name sends none there, an OpenAI reasoning model does.
         let mut conn = <AcpServerConnection as Connection>::new(
             TestConnectionConfig {
-                current_model: "claude-sonnet-4".to_string(),
+                current_model: "o3".to_string(),
                 ..Default::default()
             },
             openai,

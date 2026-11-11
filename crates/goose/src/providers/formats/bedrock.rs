@@ -17,9 +17,9 @@ use crate::conversation::message::{Message, MessageContent};
 use crate::providers::bedrock::BEDROCK_PROVIDER_NAME;
 use crate::providers::canonical::maybe_get_canonical_model;
 use crate::providers::formats::anthropic::{
-    adaptive_output_effort, model_supports_temperature, requires_explicit_thinking_disable,
-    thinking_block_is_stale, thinking_budget_tokens, thinking_type_for_provider, ThinkingType,
-    ANTHROPIC_PROVIDER_NAME, MIN_ANSWER_TOKENS,
+    adaptive_effort_wire, model_supports_temperature, requires_explicit_thinking_disable,
+    thinking_block_is_stale, thinking_budget_tokens, thinking_levels_sent,
+    thinking_type_for_provider, ThinkingType, ANTHROPIC_PROVIDER_NAME, MIN_ANSWER_TOKENS,
 };
 use crate::utils::{sanitize_unicode_tags, strip_unicode_tags};
 use goose_providers::conversation::token_usage::Usage;
@@ -87,12 +87,45 @@ pub fn bedrock_anthropic_thinking_fields(model_config: &ModelConfig) -> Option<D
             "output_config".to_string(),
             Document::Object(HashMap::from([(
                 "effort".to_string(),
-                Document::String(adaptive_output_effort(model_config).to_string()),
+                Document::String(adaptive_effort_wire(
+                    ANTHROPIC_PROVIDER_NAME,
+                    &anthropic_config,
+                )),
             )])),
         );
     }
 
     Some(Document::Object(fields))
+}
+
+/// The levels a Bedrock Claude request sends for `model_config` (N785), read
+/// off `bedrock_anthropic_thinking_fields`; `None` for non-Claude models.
+pub fn bedrock_thinking_levels_sent(model_config: &ModelConfig) -> Option<Vec<String>> {
+    bedrock_anthropic_model_config(model_config)?;
+    Some(thinking_levels_sent(model_config, |config| {
+        Some(
+            bedrock_anthropic_thinking_fields(config)
+                .map(|fields| document_to_value(&fields))
+                .unwrap_or_else(|| Value::Object(Default::default())),
+        )
+    }))
+}
+
+fn document_to_value(document: &Document) -> Value {
+    match document {
+        Document::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), document_to_value(value)))
+                .collect(),
+        ),
+        Document::Array(items) => Value::Array(items.iter().map(document_to_value).collect()),
+        Document::Number(Number::PosInt(n)) => Value::from(*n),
+        Document::Number(Number::NegInt(n)) => Value::from(*n),
+        Document::Number(Number::Float(n)) => Value::from(*n),
+        Document::String(text) => Value::String(text.clone()),
+        Document::Bool(flag) => Value::Bool(*flag),
+        Document::Null => Value::Null,
+    }
 }
 
 fn bedrock_anthropic_model_config(model_config: &ModelConfig) -> Option<ModelConfig> {

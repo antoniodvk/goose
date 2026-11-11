@@ -1,7 +1,7 @@
 use crate::cache_semantics::{apply_chat_payload_breakpoints, CacheSemantics};
 use crate::conversation::message::{Message, MessageContentBlock, RESPONSES_REPLAY_KEY};
 use crate::formats::anthropic::{
-    adaptive_output_effort, model_supports_temperature, requires_explicit_thinking_disable,
+    adaptive_effort_wire, model_supports_temperature, requires_explicit_thinking_disable,
     thinking_block_is_stale, thinking_budget_tokens, thinking_type_for_provider, ThinkingType,
 };
 use crate::model::{is_goose_internal_request_param, ModelConfig};
@@ -308,7 +308,7 @@ fn apply_claude_thinking_config(
             );
             obj.insert(
                 "output_config".to_string(),
-                json!({ "effort": adaptive_output_effort(model_config).to_string() }),
+                json!({ "effort": adaptive_effort_wire(provider_name, model_config) }),
             );
             obj.insert(
                 "max_completion_tokens".to_string(),

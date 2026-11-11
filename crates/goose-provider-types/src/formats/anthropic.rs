@@ -781,27 +781,81 @@ pub fn thinking_effort(model_config: &ModelConfig) -> ThinkingEffort {
         .unwrap_or(ThinkingEffort::High)
 }
 
-/// The effort levels goose offers and sends for `model_name` (N774): an
-/// adaptive model's catalog levels as `output_config.effort`, plus `none` when
-/// Off turns thinking off (adaptive, not always-on). `None` keeps goose's
-/// budget-based levels for models without adaptive effort.
-pub fn declared_reasoning_efforts(provider_name: &str, model_name: &str) -> Option<Vec<String>> {
-    let canonical = maybe_get_canonical_model(provider_name, model_name)?;
-    if canonical.reasoning != Some(true) {
-        return None;
+/// The thinking efforts that change what a request built by `build` sends
+/// (N785), as `reasoning_effort` levels, ascending, each once: the level the
+/// request names (`output_config.effort`, `reasoning_effort`), `none` where it
+/// does not think, and for a thinking budget the highest effort sending it
+/// (Minimal shares Low's budget, XHigh Max's, and a `max_tokens` cap can merge
+/// more). The effort menu offers exactly these, so it cannot drift from the
+/// request; every Claude transport reads its menu this way.
+pub fn thinking_levels_sent(
+    model_config: &ModelConfig,
+    build: impl Fn(&ModelConfig) -> Option<Value>,
+) -> Vec<String> {
+    // (thinking fields of the request, level shown, level is a budget's)
+    let mut sent: Vec<(Value, String, bool)> = Vec::new();
+    for effort in ThinkingEffort::ALL {
+        let Some(payload) = build(&model_config.clone().with_thinking_effort(effort)) else {
+            continue;
+        };
+        let named = payload
+            .pointer("/output_config/effort")
+            .or_else(|| payload.get("reasoning_effort"))
+            .or_else(|| payload.pointer("/reasoning/effort"))
+            .and_then(Value::as_str);
+        let thinks = payload
+            .pointer("/thinking/type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind != "disabled");
+        let budget = named.is_none() && thinks;
+        let level = match named {
+            Some(level) => level,
+            None if thinks => effort.reasoning_level(),
+            None => ThinkingEffort::Off.reasoning_level(),
+        };
+        let fields = json!([
+            payload.get("thinking"),
+            payload.get("output_config"),
+            payload.get("reasoning_effort"),
+            payload.get("reasoning"),
+        ]);
+        if let Some((_, shown, is_budget)) = sent.iter_mut().find(|(known, ..)| *known == fields) {
+            if *is_budget {
+                *shown = level.to_string();
+            }
+        } else if !sent.iter().any(|(_, shown, _)| shown == level) {
+            sent.push((fields, level.to_string(), budget));
+        }
     }
-    let mut levels = canonical
-        .reasoning_efforts
-        .filter(|levels| !levels.is_empty())?;
-    match canonical_thinking_mode(provider_name, model_name)? {
-        ThinkingMode::AlwaysOnAdaptive => {}
-        ThinkingMode::Adaptive => levels.insert(0, "none".to_string()),
-        ThinkingMode::Enabled => return None,
-    }
-    Some(levels)
+    sent.into_iter().map(|(_, level, _)| level).collect()
 }
 
-fn adaptive_effort_wire(provider_name: &str, model_config: &ModelConfig) -> String {
+/// The levels the Anthropic request for `model_name` sends (N774, N785), read
+/// off `create_request_for_model` for every effort.
+pub fn declared_reasoning_efforts(
+    provider_name: &str,
+    model_name: &str,
+    options: &AnthropicFormatOptions,
+) -> Vec<String> {
+    let model_config = ModelConfig::new(model_name).with_canonical_limits(provider_name);
+    let messages = [Message::user().with_text(".")];
+    thinking_levels_sent(&model_config, |config| {
+        create_request_for_model(
+            provider_name,
+            config,
+            model_name,
+            "",
+            &messages,
+            &[],
+            options.clone(),
+        )
+        .ok()
+    })
+}
+
+/// The `output_config.effort` an adaptive Claude request sends, shared by every
+/// Claude transport (Anthropic, Bedrock, Databricks; N785).
+pub fn adaptive_effort_wire(provider_name: &str, model_config: &ModelConfig) -> String {
     // The catalog's levels are what the model accepts and what the menu offers
     // (N774): the chosen one is sent, the closest one for a stray value.
     if let Some(level) =
@@ -1983,7 +2037,11 @@ mod tests {
                 vec!["low", "medium", "high", "xhigh", "max"],
             ),
         ] {
-            let declared = declared_reasoning_efforts(ANTHROPIC_PROVIDER_NAME, model).unwrap();
+            let declared = declared_reasoning_efforts(
+                ANTHROPIC_PROVIDER_NAME,
+                model,
+                &AnthropicFormatOptions::default(),
+            );
             assert_eq!(declared, expected, "{model}");
             for effort in super::super::openai::thinking_efforts_for_reasoning_efforts(&declared) {
                 let mut config = cfg(model).with_thinking_effort(effort);
@@ -2001,12 +2059,31 @@ mod tests {
                 }
             }
         }
-        // Budget-based models keep goose's own levels.
+        // N785: a budget model offers Off and one level per budget it sends;
+        // Minimal shares Low's budget, XHigh Max's.
         assert_eq!(
-            declared_reasoning_efforts(ANTHROPIC_PROVIDER_NAME, "claude-sonnet-4-5"),
-            None
+            declared_reasoning_efforts(
+                ANTHROPIC_PROVIDER_NAME,
+                "claude-sonnet-4-5",
+                &AnthropicFormatOptions::default(),
+            ),
+            vec!["none", "low", "medium", "high", "max"]
         );
         Ok(())
+    }
+
+    /// N785: a `max_tokens` cap that clamps several budgets to one merges them
+    /// into the highest level sending it.
+    #[test]
+    fn budget_levels_merge_under_a_max_tokens_cap() {
+        let _guard = env_lock::lock_env([("GOOSE_THINKING_EFFORT", None::<&str>)]);
+        let mut config = cfg("claude-sonnet-4-5");
+        config.max_tokens = Some(12_000);
+        let messages = [Message::user().with_text(".")];
+        let levels = thinking_levels_sent(&config, |config| {
+            create_request_with_default_options(config, "", &messages, &[]).ok()
+        });
+        assert_eq!(levels, vec!["none", "low", "medium", "max"]);
     }
 
     #[test]

@@ -30,9 +30,9 @@ use serde_json::Value;
 use smithy_transport_reqwest::ReqwestHttpClient;
 
 use super::formats::bedrock::{
-    bedrock_anthropic_thinking_fields, bedrock_inference_config, from_bedrock_message,
-    from_bedrock_usage, sanitize_json_unicode_tags, to_bedrock_message_with_caching,
-    to_bedrock_tool_config,
+    bedrock_anthropic_thinking_fields, bedrock_inference_config, bedrock_thinking_levels_sent,
+    from_bedrock_message, from_bedrock_usage, sanitize_json_unicode_tags,
+    to_bedrock_message_with_caching, to_bedrock_tool_config,
 };
 
 pub(crate) const BEDROCK_PROVIDER_NAME: &str = "aws_bedrock";
@@ -937,6 +937,13 @@ impl ProviderDef for BedrockProvider {
 impl Provider for BedrockProvider {
     fn get_name(&self) -> &str {
         &self.name
+    }
+
+    /// Claude models offer the levels their request sends (N785).
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        bedrock_thinking_levels_sent(
+            &ModelConfig::new(model_name).with_canonical_limits(&self.name),
+        )
     }
 
     fn retry_config(&self) -> RetryConfig {

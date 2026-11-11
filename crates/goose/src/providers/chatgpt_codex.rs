@@ -66,6 +66,22 @@ fn reasoning_levels_for_model(model_name: &str) -> Option<Vec<String>> {
     REASONING_LEVELS.lock().ok()?.get(model_name).cloned()
 }
 
+fn catalog_levels_unknown() -> bool {
+    REASONING_LEVELS
+        .lock()
+        .map_or(true, |levels| levels.is_empty())
+}
+
+/// The effort menu for `model_name` (N774, N785): the catalog's levels; a
+/// model the loaded catalog does not list is sent no `reasoning`, so it offers
+/// none. `None` only while no catalog could be loaded (not signed in).
+fn menu_reasoning_levels(model_name: &str) -> Option<Vec<String>> {
+    if catalog_levels_unknown() {
+        return None;
+    }
+    Some(reasoning_levels_for_model(model_name).unwrap_or_default())
+}
+
 fn remember_reasoning_levels(models: &[CodexCatalogEntry]) {
     if let Ok(mut levels) = REASONING_LEVELS.lock() {
         for model in models {
@@ -990,12 +1006,20 @@ impl ChatGptCodexProvider {
             ChatGptCodexAuthState::instance(),
         ));
 
-        Ok(Self {
+        let provider = Self {
             auth_provider,
             name: CHATGPT_CODEX_PROVIDER_NAME.to_string(),
             models_endpoint: CODEX_MODELS_ENDPOINT.to_string(),
             request_builder: crate::session_context::session_id_request_builder(),
-        })
+        };
+        // The effort menu reads the catalog's levels (N785): load it once per
+        // process when the provider starts, as the first request would.
+        if catalog_levels_unknown() {
+            if let Err(error) = provider.fetch_catalog().await {
+                tracing::debug!("Codex catalog not loaded at start: {error}");
+            }
+        }
+        Ok(provider)
     }
 
     /// The levels the Codex catalog lists for `model_name`. A model the catalog
@@ -1174,9 +1198,9 @@ impl Provider for ChatGptCodexProvider {
     }
 
     /// The Codex catalog's `supported_reasoning_levels`, which is what
-    /// `reasoning_effort_for_config` sends from (N774).
+    /// `reasoning_effort_for_config` sends from (N774), loaded at start (N785).
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
-        reasoning_levels_for_model(model_name)
+        menu_reasoning_levels(model_name)
     }
 
     async fn stream(
