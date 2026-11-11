@@ -694,16 +694,12 @@ impl Provider for GcpVertexAIProvider {
 
         let mut log = start_log(model_config, &request)?;
 
-        // Vertex sends the response head together with the first chunk, so this
-        // wait is the whole time to the first character.
-        let response = goose_providers::retry::notify_while_waiting(
-            GCP_VERTEX_AI_PROVIDER_NAME,
-            self.post_stream(model_config, &request, &context),
-        )
-        .await
-        .inspect_err(|e| {
-            let _ = log.error(e);
-        })?;
+        let response = self
+            .post_stream(model_config, &request, &context)
+            .await
+            .inspect_err(|e| {
+                let _ = log.error(e);
+            })?;
 
         let stream = response.bytes_stream().map_err(io::Error::other);
 

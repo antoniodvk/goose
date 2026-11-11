@@ -93,67 +93,69 @@ where
     WAIT_NOTICE.scope(notify, fut).await
 }
 
-/// Awaits a provider request and reports to the turn's listener while it stays
-/// unanswered: first after [`WAIT_NOTICE_AFTER`], then every [`WAIT_NOTICE_EVERY`].
+/// Watches one model request of any provider from its start to its first
+/// stream item and reports to the turn's listener while it stays unanswered:
+/// first after [`WAIT_NOTICE_AFTER`], then every [`WAIT_NOTICE_EVERY`].
 /// The request itself is never cut short.
-pub async fn notify_while_waiting<T, E, F>(provider: &str, fut: F) -> Result<T, E>
-where
-    F: Future<Output = Result<T, E>>,
-{
-    notify_while_waiting_every(provider, WAIT_NOTICE_AFTER, WAIT_NOTICE_EVERY, fut).await
+#[cfg(not(target_arch = "wasm32"))]
+pub struct WaitWatch {
+    provider: String,
+    started: tokio::time::Instant,
+    next: Duration,
+    every: Duration,
+    notified: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn notify_while_waiting_every<T, E, F>(
-    provider: &str,
-    after: Duration,
-    every: Duration,
-    fut: F,
-) -> Result<T, E>
-where
-    F: Future<Output = Result<T, E>>,
-{
-    let send = |waited: Duration, answered: bool| {
+impl WaitWatch {
+    pub fn new(provider: &str) -> Self {
+        Self::with_intervals(provider, WAIT_NOTICE_AFTER, WAIT_NOTICE_EVERY)
+    }
+
+    fn with_intervals(provider: &str, after: Duration, every: Duration) -> Self {
+        Self {
+            provider: provider.to_string(),
+            started: tokio::time::Instant::now(),
+            next: after,
+            every,
+            notified: false,
+        }
+    }
+
+    fn send(&self, waited: Duration, answered: bool) {
         let _ = WAIT_NOTICE.try_with(|notify| {
             notify(&WaitNotice {
-                provider: provider.to_string(),
+                provider: self.provider.clone(),
                 waited,
                 answered,
             })
         });
-    };
-    let started = tokio::time::Instant::now();
-    let mut fut = std::pin::pin!(fut);
-    let mut waited = after;
-    let mut notified = false;
-    loop {
-        match tokio::time::timeout_at(started + waited, fut.as_mut()).await {
-            Ok(result) => {
-                if notified && result.is_ok() {
-                    send(started.elapsed(), true);
+    }
+
+    /// Awaits one step of the request (opening the stream, its first item) and
+    /// reports each interval that passes meanwhile; the clock runs from the
+    /// start of the request across all steps.
+    pub async fn watch<F: Future>(&mut self, fut: F) -> F::Output {
+        let mut fut = std::pin::pin!(fut);
+        loop {
+            match tokio::time::timeout_at(self.started + self.next, fut.as_mut()).await {
+                Ok(output) => return output,
+                Err(_) => {
+                    self.notified = true;
+                    self.send(self.next, false);
+                    self.next += self.every;
                 }
-                return result;
-            }
-            Err(_) => {
-                notified = true;
-                send(waited, false);
-                waited += every;
             }
         }
     }
-}
 
-#[cfg(target_arch = "wasm32")]
-async fn notify_while_waiting_every<T, E, F>(
-    _provider: &str,
-    _after: Duration,
-    _every: Duration,
-    fut: F,
-) -> Result<T, E>
-where
-    F: Future<Output = Result<T, E>>,
-{
-    fut.await
+    /// The provider has answered: closes a wait that was reported.
+    pub fn answered(&mut self) {
+        if self.notified {
+            self.notified = false;
+            self.send(self.started.elapsed(), true);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -415,10 +417,12 @@ impl<P: Provider> ProviderRetry for P {
 mod tests {
     use super::*;
 
-    fn wait_notices<F>(fut: F) -> (Result<u8, ()>, Vec<(u64, bool)>)
-    where
-        F: Future<Output = Result<u8, ()>>,
-    {
+    /// Runs a request of two steps (open the stream, first item) under a watch.
+    fn wait_notices(
+        open_ms: u64,
+        first_item_ms: u64,
+        answer: Result<u8, ()>,
+    ) -> (Result<u8, ()>, Vec<(u64, bool)>) {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
         let notify: WaitNoticeFn = std::sync::Arc::new(move |notice: &WaitNotice| {
@@ -431,32 +435,38 @@ mod tests {
             .enable_time()
             .build()
             .unwrap();
-        let result = runtime.block_on(with_wait_notice(
-            notify,
-            notify_while_waiting_every(
+        let result = runtime.block_on(with_wait_notice(notify, async {
+            let mut wait = WaitWatch::with_intervals(
                 "gcp_vertex_ai",
                 Duration::from_millis(60),
                 Duration::from_millis(40),
-                fut,
-            ),
-        ));
+            );
+            wait.watch(sleep(Duration::from_millis(open_ms))).await;
+            let item = wait
+                .watch(async {
+                    sleep(Duration::from_millis(first_item_ms)).await;
+                    answer
+                })
+                .await;
+            if item.is_ok() {
+                wait.answered();
+            }
+            item
+        }));
         let seen = seen.lock().unwrap().clone();
         (result, seen)
     }
 
     #[test]
     fn quick_answer_sends_no_wait_notice() {
-        let (result, seen) = wait_notices(async { Ok(1) });
+        let (result, seen) = wait_notices(0, 0, Ok(1));
         assert_eq!(result, Ok(1));
         assert!(seen.is_empty());
     }
 
     #[test]
-    fn silent_provider_is_reported_until_it_answers() {
-        let (result, seen) = wait_notices(async {
-            sleep(Duration::from_millis(130)).await;
-            Ok(1)
-        });
+    fn silent_provider_is_reported_across_both_steps_until_it_answers() {
+        let (result, seen) = wait_notices(70, 60, Ok(1));
         assert_eq!(result, Ok(1));
         assert_eq!(seen[..2], [(60, false), (100, false)]);
         let (waited, answered) = *seen.last().unwrap();
@@ -466,10 +476,7 @@ mod tests {
 
     #[test]
     fn late_error_is_not_reported_as_an_answer() {
-        let (result, seen) = wait_notices(async {
-            sleep(Duration::from_millis(80)).await;
-            Err(())
-        });
+        let (result, seen) = wait_notices(0, 80, Err(()));
         assert_eq!(result, Err(()));
         assert_eq!(seen, [(60, false)]);
     }

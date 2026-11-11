@@ -301,16 +301,20 @@ pub(crate) async fn stream_response_from_provider(
     .await;
     let request_started = std::time::Instant::now();
     debug!("WAITING_LLM_STREAM_START");
-    let stream_result = crate::session_context::with_session_id(
-        Some(session_id.clone()),
-        provider.stream(
-            &model_config,
-            system_prompt.as_str(),
-            messages_for_provider.messages(),
-            &tools,
-        ),
-    )
-    .await;
+    // Every provider: a request that stays unanswered is reported to the client
+    // from here until its first stream item; it is never cut short.
+    let mut wait = goose_providers::retry::WaitWatch::new(provider.get_name());
+    let stream_result = wait
+        .watch(crate::session_context::with_session_id(
+            Some(session_id.clone()),
+            provider.stream(
+                &model_config,
+                system_prompt.as_str(),
+                messages_for_provider.messages(),
+                &tools,
+            ),
+        ))
+        .await;
     debug!("WAITING_LLM_STREAM_END");
 
     // If there was an error creating the stream, return a stream that yields that error
@@ -332,9 +336,10 @@ pub(crate) async fn stream_response_from_provider(
             let mut attempts = 0;
 
             loop {
-                match stream.next().await {
+                match wait.watch(stream.next()).await {
                     None => break,
                     Some(Ok(item)) => {
+                        wait.answered();
                         stream = Box::pin(
                             futures::stream::once(std::future::ready(Ok(item))).chain(stream),
                         );
@@ -371,16 +376,17 @@ pub(crate) async fn stream_response_from_provider(
                             tokio::time::sleep(delay).await;
                         }
 
-                        stream = match crate::session_context::with_session_id(
-                            Some(session_id.clone()),
-                            provider.stream(
-                                &model_config,
-                                system_prompt.as_str(),
-                                messages_for_provider.messages(),
-                                &tools,
-                            ),
-                        )
-                        .await
+                        stream = match wait
+                            .watch(crate::session_context::with_session_id(
+                                Some(session_id.clone()),
+                                provider.stream(
+                                    &model_config,
+                                    system_prompt.as_str(),
+                                    messages_for_provider.messages(),
+                                    &tools,
+                                ),
+                            ))
+                            .await
                         {
                             Ok(stream) => stream,
                             Err(error) => {
@@ -391,6 +397,11 @@ pub(crate) async fn stream_response_from_provider(
                     Some(Err(error)) => Err(error)?,
                 }
             }
+        } else if let Some(first) = wait.watch(stream.next()).await {
+            if first.is_ok() {
+                wait.answered();
+            }
+            stream = Box::pin(futures::stream::once(std::future::ready(first)).chain(stream));
         }
 
         if config.toolshim {
