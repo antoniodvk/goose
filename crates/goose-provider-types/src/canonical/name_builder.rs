@@ -87,7 +87,7 @@ pub fn map_to_canonical_model(
             return Some(canonical.id.clone());
         }
         if model.starts_with("gemini-") {
-            return None;
+            return gemini_base_model(registry_provider, model, registry);
         }
     }
 
@@ -100,6 +100,9 @@ pub fn map_to_canonical_model(
         // Also try original model name
         if let Some(canonical) = registry.get(registry_provider, model) {
             return Some(canonical.id.clone());
+        }
+        if let Some(canonical) = gemini_base_model(registry_provider, model, registry) {
+            return Some(canonical);
         }
         // If direct lookup failed, fall through to inference logic below
     }
@@ -153,6 +156,38 @@ pub fn map_to_canonical_model(
         }
     }
 
+    None
+}
+
+/// Whether `segment` is one of the tags Google appends to a Gemini model id:
+/// `preview`, `exp`, `latest`, or a number (dates such as `-11-2026` or
+/// `-05-20`, revisions such as `-001`).
+fn is_gemini_id_tag(segment: &str) -> bool {
+    matches!(segment, "preview" | "exp" | "experimental" | "latest")
+        || (!segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// The catalog entry of the base model of a Gemini id carrying such tags, so
+/// a new `gemini-5-neon-preview-11-2026` finds `gemini-5-neon` (C256). Tags
+/// are dropped from the end one by one; the longest listed base wins.
+fn gemini_base_model(
+    registry_provider: &str,
+    model: &str,
+    registry: &super::CanonicalModelRegistry,
+) -> Option<String> {
+    if !model.starts_with("gemini-") {
+        return None;
+    }
+    let mut base = model;
+    while let Some((head, tag)) = base.rsplit_once('-') {
+        if !is_gemini_id_tag(tag) {
+            break;
+        }
+        base = head;
+        if let Some(canonical) = registry.get(registry_provider, base) {
+            return Some(canonical.id.clone());
+        }
+    }
     None
 }
 
@@ -598,6 +633,35 @@ mod tests {
         assert_eq!(
             map_to_canonical_model("gcp_vertex_ai", "claude-haiku-4-5@20251001", &r),
             Some("google-vertex/claude-haiku-4.5".to_string())
+        );
+    }
+
+    /// C256: a Gemini id with tags appended finds its base model's entry.
+    #[test]
+    fn gemini_id_with_tags_finds_base_model() {
+        let r = super::super::CanonicalModelRegistry::bundled().unwrap();
+
+        assert_eq!(
+            map_to_canonical_model("gcp_vertex_ai", "gemini-4-argon-preview-11-2026", &r),
+            Some("google-vertex/gemini-4-argon".to_string())
+        );
+        assert_eq!(
+            map_to_canonical_model("gcp_vertex_ai", "gemini-3.8-flash-001", &r),
+            Some("google-vertex/gemini-3.8-flash".to_string())
+        );
+        assert_eq!(
+            map_to_canonical_model("google", "gemini-3.8-flash-preview-11-2026", &r),
+            Some("google/gemini-3.8-flash".to_string())
+        );
+        // The longest listed base wins: the preview entry, not the bare model.
+        assert_eq!(
+            map_to_canonical_model("google", "gemini-3.1-flash-lite-preview-11-2026", &r),
+            Some("google/gemini-3.1-flash-lite-preview".to_string())
+        );
+        // A name part is never dropped.
+        assert_eq!(
+            map_to_canonical_model("gcp_vertex_ai", "gemini-4-xenon-preview", &r),
+            None
         );
     }
 

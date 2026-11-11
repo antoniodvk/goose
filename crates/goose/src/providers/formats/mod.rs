@@ -17,7 +17,9 @@ pub mod google {
 
     use crate::config::Config;
 
+    /// `provider` names the catalog that describes the model (C256).
     pub fn create_request(
+        provider: &str,
         model_config: &ModelConfig,
         system: &str,
         messages: &[Message],
@@ -26,7 +28,14 @@ pub mod google {
         // TODO: Remove this config fallback wrapper once gemini_oauth and Vertex/GCP Gemini
         // move into goose-providers and receive provider config during construction.
         let thinking_budget = Config::global().get_param("GEMINI25_THINKING_BUDGET").ok();
-        create_request_with_thinking_budget(model_config, system, messages, tools, thinking_budget)
+        create_request_with_thinking_budget(
+            provider,
+            model_config,
+            system,
+            messages,
+            tools,
+            thinking_budget,
+        )
     }
 }
 pub mod openrouter {

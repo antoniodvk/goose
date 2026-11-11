@@ -650,7 +650,10 @@ impl Provider for GcpVertexAIProvider {
 
     /// Gemini 3+ thinking levels, which the Google request sends (N774).
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
-        goose_providers::formats::google::gemini_reasoning_efforts(model_name)
+        goose_providers::formats::google::gemini_reasoning_efforts(
+            GCP_VERTEX_AI_PROVIDER_NAME,
+            model_name,
+        )
     }
 
     /// Completes a model interaction by sending a request and processing the response.

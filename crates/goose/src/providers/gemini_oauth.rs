@@ -967,7 +967,10 @@ impl Provider for GeminiOAuthProvider {
 
     /// Gemini 3+ thinking levels, which the Google request sends (N774).
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
-        goose_providers::formats::google::gemini_reasoning_efforts(model_name)
+        goose_providers::formats::google::gemini_reasoning_efforts(
+            GEMINI_OAUTH_PROVIDER_NAME,
+            model_name,
+        )
     }
 
     async fn configure_oauth(&self) -> Result<(), ProviderError> {
@@ -992,7 +995,13 @@ impl Provider for GeminiOAuthProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        let payload = create_request(model_config, system, messages, tools)?;
+        let payload = create_request(
+            GEMINI_OAUTH_PROVIDER_NAME,
+            model_config,
+            system,
+            messages,
+            tools,
+        )?;
         let mut log = start_log(model_config, &payload)?;
 
         let response = self

@@ -643,17 +643,20 @@ fn is_gemini_3_or_newer(model_name: &str) -> bool {
 }
 
 /// The `thinkingLevel` values goose offers and sends for a Gemini 3+ model
-/// (N774): the Google catalog entry's levels, else the levels goose has always
-/// sent (3.5/3.6 know `minimal`, 3-pro only `low`/`high`). No `none`: Gemini 3
-/// cannot turn thinking off, so Off is never a level of its own. `None` for
-/// other models, which keep the model-name based menu.
-pub fn gemini_reasoning_efforts(model_name: &str) -> Option<Vec<String>> {
+/// (N774): the levels of the model's entry in `provider`'s catalog (Vertex:
+/// `google-vertex`, C256), else of its Google entry, else the levels goose has
+/// always sent (3.5/3.6 know `minimal`, 3-pro only `low`/`high`). No `none`:
+/// Gemini 3 cannot turn thinking off, so Off is never a level of its own.
+/// `None` for other models, which keep the model-name based menu.
+pub fn gemini_reasoning_efforts(provider: &str, model_name: &str) -> Option<Vec<String>> {
     if !is_gemini_3_or_newer(model_name) {
         return None;
     }
-    if let Some(levels) = super::openai::catalog_reasoning_efforts("google", model_name)
-        .filter(|levels| !levels.is_empty())
-    {
+    let catalog_levels = |catalog: &str| {
+        super::openai::catalog_reasoning_efforts(catalog, model_name)
+            .filter(|levels| !levels.is_empty())
+    };
+    if let Some(levels) = catalog_levels(provider).or_else(|| catalog_levels("google")) {
         return Some(levels);
     }
     let lower = model_name.to_lowercase();
@@ -678,6 +681,7 @@ fn gemini_thinking_level(level: &str) -> Option<ThinkingLevel> {
 }
 
 fn get_thinking_config(
+    provider: &str,
     model_config: &ModelConfig,
     thinking_budget: Option<i32>,
 ) -> Option<ThinkingConfig> {
@@ -685,7 +689,7 @@ fn get_thinking_config(
     // (e.g. Off from the global default) the closest of them (N774).
     if model_config.reasoning != Some(false) {
         if let (Some(levels), Some(effort)) = (
-            gemini_reasoning_efforts(&model_config.model_name),
+            gemini_reasoning_efforts(provider, &model_config.model_name),
             model_config.thinking_effort(),
         ) {
             let thinking_level = super::openai::nearest_reasoning_effort(
@@ -769,20 +773,14 @@ pub fn create_request(
     messages: &[Message],
     tools: &[Tool],
 ) -> Result<Value> {
-    create_request_impl(model_config, system, messages, tools, None)
+    create_request_with_thinking_budget("google", model_config, system, messages, tools, None)
 }
 
+/// `provider` is the goose provider whose catalog describes the model
+/// (`google`, `gemini_oauth`, `gcp_vertex_ai`), so menu and request read the
+/// same thinking levels (C256).
 pub fn create_request_with_thinking_budget(
-    model_config: &ModelConfig,
-    system: &str,
-    messages: &[Message],
-    tools: &[Tool],
-    thinking_budget: Option<i32>,
-) -> Result<Value> {
-    create_request_impl(model_config, system, messages, tools, thinking_budget)
-}
-
-fn create_request_impl(
+    provider: &str,
     model_config: &ModelConfig,
     system: &str,
     messages: &[Message],
@@ -797,14 +795,17 @@ fn create_request_impl(
         })
     };
 
-    let thinking_config = get_thinking_config(model_config, thinking_budget);
+    let thinking_config = get_thinking_config(provider, model_config, thinking_budget);
     let temperature = (!is_gemini_3_or_newer(&model_config.model_name))
         .then(|| model_config.temperature.map(|t| t as f64))
         .flatten();
 
+    // Only a known limit (configured or from the catalog) is sent: without
+    // one Google applies the model's own maximum, while the generic 4096
+    // fallback would cut off a model the catalog does not list yet (C256).
     let generation_config = Some(GenerationConfig {
         temperature,
-        max_output_tokens: Some(model_config.max_output_tokens()),
+        max_output_tokens: model_config.max_tokens,
         thinking_config,
     });
 
@@ -1835,16 +1836,16 @@ data: [DONE]"#;
         use crate::model::ModelConfig;
 
         let config = ModelConfig::new("gemini-2.5-flash").with_thinking_effort(ThinkingEffort::Off);
-        let thinking_config = get_thinking_config(&config, None).unwrap();
+        let thinking_config = get_thinking_config("google", &config, None).unwrap();
         assert_eq!(thinking_config.thinking_budget, Some(0));
         assert!(!thinking_config.include_thoughts);
 
         let config = ModelConfig::new("gemini-2.5-pro").with_thinking_effort(ThinkingEffort::Off);
-        assert!(get_thinking_config(&config, None).is_none());
+        assert!(get_thinking_config("google", &config, None).is_none());
 
         let config =
             ModelConfig::new("gemini-3.5-flash-lite").with_thinking_effort(ThinkingEffort::Off);
-        let thinking_config = get_thinking_config(&config, None).unwrap();
+        let thinking_config = get_thinking_config("google", &config, None).unwrap();
         assert!(matches!(
             thinking_config.thinking_level,
             Some(ThinkingLevel::Minimal)
@@ -1861,7 +1862,7 @@ data: [DONE]"#;
         params.insert("thinking_effort".to_string(), serde_json::json!("low"));
         let mut config = ModelConfig::new("gemini-3-pro");
         config.request_params = Some(params);
-        let result = get_thinking_config(&config, None);
+        let result = get_thinking_config("google", &config, None);
         assert!(result.is_some());
         let thinking_config = result.unwrap();
         assert!(thinking_config.thinking_level.is_some());
@@ -1870,7 +1871,7 @@ data: [DONE]"#;
 
         let config =
             ModelConfig::new("gemini-3.6-flash").with_thinking_effort(ThinkingEffort::Medium);
-        let thinking_config = get_thinking_config(&config, None).unwrap();
+        let thinking_config = get_thinking_config("google", &config, None).unwrap();
         assert!(matches!(
             thinking_config.thinking_level,
             Some(ThinkingLevel::Medium)
@@ -1880,7 +1881,7 @@ data: [DONE]"#;
         // the higher on a tie, as for every provider (N774).
         let config =
             ModelConfig::new("gemini-3-pro-preview").with_thinking_effort(ThinkingEffort::Medium);
-        let thinking_config = get_thinking_config(&config, None).unwrap();
+        let thinking_config = get_thinking_config("google", &config, None).unwrap();
         assert!(matches!(
             thinking_config.thinking_level,
             Some(ThinkingLevel::High)
@@ -1891,7 +1892,7 @@ data: [DONE]"#;
         params.insert("thinking_effort".to_string(), serde_json::json!("high"));
         let mut config = ModelConfig::new("Gemini-3-Flash");
         config.request_params = Some(params);
-        let result = get_thinking_config(&config, None);
+        let result = get_thinking_config("google", &config, None);
         assert!(result.is_some());
         let thinking_config = result.unwrap();
         assert!(matches!(
@@ -1900,7 +1901,7 @@ data: [DONE]"#;
         ));
 
         let config = ModelConfig::new("gemini-2.5-flash");
-        let result = get_thinking_config(&config, None);
+        let result = get_thinking_config("google", &config, None);
         assert!(result.is_some());
         let thinking_config = result.unwrap();
         assert!(thinking_config.include_thoughts);
@@ -1913,7 +1914,7 @@ data: [DONE]"#;
         let mut params = HashMap::new();
         params.insert("thinking_budget".to_string(), json!(4096));
         let config = ModelConfig::new("gemini-2.5-flash").with_merged_request_params(params);
-        let result = get_thinking_config(&config, None);
+        let result = get_thinking_config("google", &config, None);
         assert!(result.is_some());
         let thinking_config = result.unwrap();
         assert_eq!(thinking_config.thinking_budget, Some(4096));
@@ -1921,7 +1922,7 @@ data: [DONE]"#;
         let mut params = HashMap::new();
         params.insert("thinking_budget".to_string(), json!(-1));
         let config = ModelConfig::new("gemini-2.5-flash").with_merged_request_params(params);
-        let result = get_thinking_config(&config, None);
+        let result = get_thinking_config("google", &config, None);
         assert!(result.is_some());
         let thinking_config = result.unwrap();
         assert_eq!(
@@ -1930,11 +1931,11 @@ data: [DONE]"#;
         );
 
         let config = ModelConfig::new("gemini-2.0-flash");
-        let result = get_thinking_config(&config, None);
+        let result = get_thinking_config("google", &config, None);
         assert!(result.is_none());
 
         let config = ModelConfig::new("gpt-4o");
-        let result = get_thinking_config(&config, None);
+        let result = get_thinking_config("google", &config, None);
         assert!(result.is_none());
     }
 
@@ -1942,7 +1943,7 @@ data: [DONE]"#;
     /// Off is no level of its own (Gemini 3 cannot turn thinking off).
     #[test]
     fn gemini_menu_levels_are_the_levels_sent() {
-        let declared = gemini_reasoning_efforts("gemini-3.6-flash").unwrap();
+        let declared = gemini_reasoning_efforts("google", "gemini-3.6-flash").unwrap();
         assert_eq!(declared, ["minimal", "low", "medium", "high"]);
         for effort in super::super::openai::thinking_efforts_for_reasoning_efforts(&declared) {
             let config = ModelConfig::new("gemini-3.6-flash").with_thinking_effort(effort);
@@ -1953,7 +1954,38 @@ data: [DONE]"#;
                 "{effort}"
             );
         }
-        assert_eq!(gemini_reasoning_efforts("gemini-2.5-flash"), None);
+        assert_eq!(gemini_reasoning_efforts("google", "gemini-2.5-flash"), None);
+    }
+
+    /// C256: a Gemini id the catalog does not list gets no invented output
+    /// limit (Google applies the model's own maximum); a known limit is sent.
+    #[test]
+    fn unlisted_gemini_sends_no_output_limit() {
+        let config = ModelConfig::new("gemini-9-xenon");
+        let payload = create_request(&config, "system", &[], &[]).unwrap();
+        assert!(payload["generationConfig"].get("maxOutputTokens").is_none());
+
+        let config = ModelConfig::new("gemini-9-xenon").with_max_tokens(Some(32768));
+        let payload = create_request(&config, "system", &[], &[]).unwrap();
+        assert_eq!(payload["generationConfig"]["maxOutputTokens"], json!(32768));
+    }
+
+    /// C256: Vertex reads the levels of its own catalog entry, also for an id
+    /// with tags appended, and menu and request agree.
+    #[test]
+    fn vertex_levels_come_from_the_vertex_entry_of_the_base_model() {
+        let model = "gemini-3.1-flash-image-preview-11-2026";
+        let declared = gemini_reasoning_efforts("gcp_vertex_ai", model).unwrap();
+        assert_eq!(declared, ["minimal", "high"]);
+        let config = ModelConfig::new(model).with_thinking_effort(ThinkingEffort::Medium);
+        let payload =
+            create_request_with_thinking_budget("gcp_vertex_ai", &config, "system", &[], &[], None)
+                .unwrap();
+        let sent = payload["generationConfig"]["thinkingConfig"]["thinkingLevel"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(declared.contains(&sent), "{sent}");
     }
 
     #[test]
@@ -1967,7 +1999,7 @@ data: [DONE]"#;
     #[test]
     fn test_newer_gemini_generations_use_thinking_level() {
         let config = ModelConfig::new("gemini-4-argon").with_thinking_effort(ThinkingEffort::High);
-        let thinking_config = get_thinking_config(&config, None).unwrap();
+        let thinking_config = get_thinking_config("google", &config, None).unwrap();
         assert!(thinking_config.include_thoughts);
         assert!(matches!(
             thinking_config.thinking_level,

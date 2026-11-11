@@ -114,7 +114,7 @@ impl Provider for GoogleProvider {
 
     /// Gemini 3+ thinking levels, which the request sends (N774).
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
-        crate::formats::google::gemini_reasoning_efforts(model_name)
+        crate::formats::google::gemini_reasoning_efforts(GOOGLE_PROVIDER_NAME, model_name)
     }
 
     async fn fetch_supported_models(&self) -> Result<Vec<String>, ProviderError> {
@@ -157,6 +157,7 @@ impl Provider for GoogleProvider {
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
         let payload = create_request_with_thinking_budget(
+            GOOGLE_PROVIDER_NAME,
             model_config,
             system,
             messages,

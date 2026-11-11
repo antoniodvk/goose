@@ -261,7 +261,7 @@ fn create_google_request(
     messages: &[Message],
     tools: &[Tool],
 ) -> Result<Value> {
-    google::create_request(model_config, system, messages, tools)
+    google::create_request("gcp_vertex_ai", model_config, system, messages, tools)
 }
 
 /// Creates a provider-specific request payload and context.
