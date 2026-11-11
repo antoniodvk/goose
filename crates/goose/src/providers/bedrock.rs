@@ -933,17 +933,51 @@ impl ProviderDef for BedrockProvider {
     }
 }
 
+/// The table entry of a model served through the Mantle Responses endpoint.
+fn mantle_entry(model_name: &str) -> Option<&'static BedrockModelEntry> {
+    find_model_entry(model_name).filter(|entry| entry.endpoint == BedrockEndpoint::MantleResponses)
+}
+
+/// The Responses request `stream` sends to Mantle; the effort menu reads its
+/// levels off it.
+fn mantle_request_payload(
+    entry: &BedrockModelEntry,
+    model_config: &ModelConfig,
+    system: &str,
+    messages: &[Message],
+    tools: &[Tool],
+) -> Result<Value> {
+    let capability_model_name = entry.name.strip_prefix("openai.").unwrap_or(entry.name);
+    let mut normalized_config = model_config.clone();
+    normalized_config.model_name = capability_model_name.to_string();
+    let mut payload = create_responses_request(&normalized_config, system, messages, tools)?;
+    payload["model"] = Value::String(entry.wire_model_id.to_string());
+    payload["stream"] = Value::Bool(true);
+    if entry.name.starts_with("google.gemma-4-") {
+        payload["parallel_tool_calls"] = Value::Bool(false);
+    }
+    Ok(payload)
+}
+
 #[async_trait]
 impl Provider for BedrockProvider {
     fn get_name(&self) -> &str {
         &self.name
     }
 
-    /// Claude models offer the levels their request sends (N785).
+    /// Every model offers the levels its request sends: Claude models off the
+    /// Converse thinking fields (N785), Mantle models off the Responses request
+    /// (N864). Converse sends thinking fields for Claude only, so any other
+    /// model offers none.
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
-        bedrock_thinking_levels_sent(
-            &ModelConfig::new(model_name).with_canonical_limits(&self.name),
-        )
+        let model_config = ModelConfig::new(model_name).with_canonical_limits(&self.name);
+        if let Some(entry) = mantle_entry(model_name) {
+            return Some(goose_providers::formats::openai::reasoning_efforts_sent(
+                &model_config,
+                |config| mantle_request_payload(entry, config, "", &[], &[]).ok(),
+            ));
+        }
+        Some(bedrock_thinking_levels_sent(&model_config).unwrap_or_default())
     }
 
     fn retry_config(&self) -> RetryConfig {
@@ -987,30 +1021,18 @@ impl Provider for BedrockProvider {
             Some(session_id.as_str())
         };
 
-        if let Some(entry) = find_model_entry(&model_config.model_name) {
-            if entry.endpoint == BedrockEndpoint::MantleResponses {
-                let capability_model_name =
-                    entry.name.strip_prefix("openai.").unwrap_or(entry.name);
-                let mut normalized_config = model_config.clone();
-                normalized_config.model_name = capability_model_name.to_string();
-                let mut payload =
-                    create_responses_request(&normalized_config, system, messages, tools)?;
-                payload["model"] = Value::String(entry.wire_model_id.to_string());
-                payload["stream"] = Value::Bool(true);
-                if entry.name.starts_with("google.gemma-4-") {
-                    payload["parallel_tool_calls"] = Value::Bool(false);
-                }
-                let mut log = start_log(model_config, &payload).map_err(anyhow::Error::from)?;
+        if let Some(entry) = mantle_entry(&model_config.model_name) {
+            let payload = mantle_request_payload(entry, model_config, system, messages, tools)?;
+            let mut log = start_log(model_config, &payload).map_err(anyhow::Error::from)?;
 
-                let response = self
-                    .with_retry(|| self.post_mantle_streaming(session_id_opt, &payload))
-                    .await
-                    .inspect_err(|e| {
-                        let _ = log.error(e);
-                    })?;
+            let response = self
+                .with_retry(|| self.post_mantle_streaming(session_id_opt, &payload))
+                .await
+                .inspect_err(|e| {
+                    let _ = log.error(e);
+                })?;
 
-                return stream_responses_compat(response, log);
-            }
+            return stream_responses_compat(response, log);
         }
 
         let model_name = model_config.model_name.clone();
@@ -1997,6 +2019,51 @@ mod tests {
             }
             other => panic!("expected RedactedThinking, got {:?}", other),
         }
+    }
+
+    /// N864: the menu of a non-Claude model is read off the request it gets.
+    #[test]
+    fn non_claude_menu_levels_are_the_levels_sent() {
+        use goose_providers::thinking::ThinkingEffort;
+
+        let (provider, _) = create_mock_provider_and_model("openai.gpt-5.5");
+        // Mantle models: the menu is the set of levels the Responses requests carry.
+        for model in ["openai.gpt-5.5", "google.gemma-4-31b"] {
+            let entry = mantle_entry(model).unwrap();
+            let mut sent: Vec<String> = Vec::new();
+            for effort in ThinkingEffort::ALL {
+                let config = ModelConfig::new(model)
+                    .with_canonical_limits("aws_bedrock")
+                    .with_thinking_effort(effort);
+                let payload = mantle_request_payload(entry, &config, "", &[], &[]).unwrap();
+                let level = payload
+                    .pointer("/reasoning/effort")
+                    .and_then(|level| level.as_str());
+                if let Some(level) = level {
+                    if !sent.iter().any(|known| known == level) {
+                        sent.push(level.to_string());
+                    }
+                }
+            }
+            assert_eq!(
+                provider.declared_reasoning_efforts(model),
+                Some(sent),
+                "{model}"
+            );
+        }
+        assert!(provider
+            .declared_reasoning_efforts("openai.gpt-5.5")
+            .is_some_and(|levels| !levels.is_empty()));
+
+        // Converse sends thinking fields for Claude only.
+        assert_eq!(
+            provider.declared_reasoning_efforts("amazon.nova-pro-v1:0"),
+            Some(vec![])
+        );
+        // Claude keeps the levels its Converse request sends (N785).
+        assert!(provider
+            .declared_reasoning_efforts("us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+            .is_some_and(|levels| !levels.is_empty()));
     }
 
     #[test]

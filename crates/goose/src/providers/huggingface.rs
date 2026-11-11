@@ -146,6 +146,11 @@ impl Provider for HuggingFaceProvider {
         self.inner.get_name()
     }
 
+    /// The wrapped provider sends the request, so it reports the levels (N864).
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        self.inner.declared_reasoning_efforts(model_name)
+    }
+
     async fn get_known_context_limit(
         &self,
         model: &str,

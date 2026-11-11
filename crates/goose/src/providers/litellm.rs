@@ -277,10 +277,41 @@ impl ProviderDef for LiteLLMProvider {
     }
 }
 
+impl LiteLLMProvider {
+    /// The request `stream` sends before cache breakpoints; the effort menu
+    /// reads its levels off it.
+    fn request_payload(
+        &self,
+        model_config: &ModelConfig,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+    ) -> Result<Value> {
+        goose_providers::formats::openai::create_request(
+            model_config,
+            system,
+            messages,
+            tools,
+            &ImageFormat::OpenAi,
+            self.supports_streaming,
+        )
+    }
+}
+
 #[async_trait]
 impl Provider for LiteLLMProvider {
     fn get_name(&self) -> &str {
         &self.name
+    }
+
+    /// The levels the requests for this model carry, read off the request
+    /// itself (N864, like N783).
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        let model_config = ModelConfig::new(model_name).with_canonical_limits(&self.name);
+        Some(goose_providers::formats::openai::reasoning_efforts_sent(
+            &model_config,
+            |config| self.request_payload(config, "", &[], &[]).ok(),
+        ))
     }
 
     async fn get_known_context_limit(
@@ -307,14 +338,7 @@ impl Provider for LiteLLMProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        let mut payload = goose_providers::formats::openai::create_request(
-            model_config,
-            system,
-            messages,
-            tools,
-            &ImageFormat::OpenAi,
-            self.supports_streaming,
-        )?;
+        let mut payload = self.request_payload(model_config, system, messages, tools)?;
 
         if !model_config.prompt_cache_disabled() && self.supports_cache_control(model_config).await
         {

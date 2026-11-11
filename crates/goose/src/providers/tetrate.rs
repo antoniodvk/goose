@@ -120,10 +120,39 @@ impl ProviderDef for TetrateProvider {
     }
 }
 
+impl TetrateProvider {
+    /// The request `stream` sends; the effort menu reads its levels off it.
+    fn request_payload(
+        model_config: &ModelConfig,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+    ) -> Result<Value> {
+        create_request(
+            model_config,
+            system,
+            messages,
+            tools,
+            &ImageFormat::OpenAi,
+            true,
+        )
+    }
+}
+
 #[async_trait]
 impl Provider for TetrateProvider {
     fn get_name(&self) -> &str {
         &self.name
+    }
+
+    /// The levels the requests for this model carry, read off the request
+    /// itself (N864, like N783).
+    fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
+        let model_config = ModelConfig::new(model_name).with_canonical_limits(&self.name);
+        Some(goose_providers::formats::openai::reasoning_efforts_sent(
+            &model_config,
+            |config| Self::request_payload(config, "", &[], &[]).ok(),
+        ))
     }
 
     async fn stream(
@@ -133,14 +162,7 @@ impl Provider for TetrateProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        let payload = create_request(
-            model_config,
-            system,
-            messages,
-            tools,
-            &ImageFormat::OpenAi,
-            true,
-        )?;
+        let payload = Self::request_payload(model_config, system, messages, tools)?;
 
         let mut log = start_log(model_config, &payload)?;
 
