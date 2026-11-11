@@ -2004,6 +2004,32 @@ pub fn thinking_efforts_for_reasoning_efforts(declared: &[String]) -> Vec<Thinki
         .collect()
 }
 
+/// The `reasoning_effort` levels a provider really sends for a model (N783):
+/// read off the request `build` produces for every thinking effort, ascending,
+/// each level once. The effort menu offers exactly these, so it cannot drift
+/// from the request. Empty when no request carries a level.
+pub fn reasoning_efforts_sent(
+    model_config: &ModelConfig,
+    build: impl Fn(&ModelConfig) -> Option<Value>,
+) -> Vec<String> {
+    let mut levels: Vec<String> = Vec::new();
+    for effort in ThinkingEffort::ALL {
+        let Some(payload) = build(&model_config.clone().with_thinking_effort(effort)) else {
+            continue;
+        };
+        let level = payload
+            .get("reasoning_effort")
+            .or_else(|| payload.pointer("/reasoning/effort"))
+            .and_then(Value::as_str);
+        if let Some(level) = level {
+            if !levels.iter().any(|known| known == level) {
+                levels.push(level.to_string());
+            }
+        }
+    }
+    levels
+}
+
 /// The `offered` level closest to `effort` (order: [`ThinkingEffort::fallback_order`]);
 /// without `offered`, the widely supported fallback levels for `model_name`.
 pub fn nearest_reasoning_effort(

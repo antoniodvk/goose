@@ -179,10 +179,19 @@ impl Provider for OpenAiCompatibleProvider {
         &self.name
     }
 
-    /// xAI models get the levels `create_request` sends for them (N774); an
-    /// xAI model that reasons without an effort knob declares none.
+    /// The levels the requests for this model carry, read off the request
+    /// itself (N783); a model whose requests carry none keeps the xAI answer
+    /// (N774: reasoning without an effort knob declares no levels).
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
-        crate::formats::openai::xai_reasoning_efforts(model_name)
+        let model_config = ModelConfig::new(model_name).with_canonical_limits(&self.name);
+        let sent = crate::formats::openai::reasoning_efforts_sent(&model_config, |config| {
+            self.build_request(config, "", &[], &[], false).ok()
+        });
+        if sent.is_empty() {
+            crate::formats::openai::xai_reasoning_efforts(model_name)
+        } else {
+            Some(sent)
+        }
     }
 
     async fn refresh_credentials(&self) -> Result<(), ProviderError> {

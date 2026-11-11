@@ -336,6 +336,27 @@ impl OpenAiProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
+        let payload = self.responses_payload_for_model(
+            model_config,
+            wire_model,
+            capability_model,
+            system,
+            messages,
+            tools,
+        )?;
+        self.stream_responses_payload(model_config, payload).await
+    }
+
+    /// The Responses API request body for `capability_model`.
+    fn responses_payload_for_model(
+        &self,
+        model_config: &ModelConfig,
+        wire_model: &str,
+        capability_model: &str,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+    ) -> Result<serde_json::Value, ProviderError> {
         let mut request_config = model_config.clone();
         request_config.supports_vision = self.vision_support(model_config);
         if self.native_openai && request_config.reasoning.is_none() {
@@ -361,7 +382,66 @@ impl OpenAiProvider {
             }
         }
         payload["stream"] = serde_json::Value::Bool(self.supports_streaming);
-        self.stream_responses_payload(model_config, payload).await
+        Ok(payload)
+    }
+
+    /// The chat-completions request body, after all provider adjustments.
+    fn chat_payload(
+        &self,
+        model_config: &ModelConfig,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+    ) -> Result<serde_json::Value, ProviderError> {
+        let declared_model = self.declared_model(&model_config.model_name);
+        let thinking_preservation_format =
+            declared_model.and_then(|m| m.thinking_preservation_format);
+        let supports_vision = self.vision_support(model_config).unwrap_or_default();
+
+        let mut payload = create_request_with_options(
+            model_config,
+            system,
+            messages,
+            tools,
+            &ImageFormat::OpenAi,
+            self.supports_streaming,
+            OpenAiFormatOptions {
+                preserve_thinking_context: self.preserve_thinking_context
+                    || thinking_preservation_format.is_some(),
+                supports_vision,
+                thinking_preservation_format,
+                ..Default::default()
+            },
+        )?;
+
+        if let Some(params) = declared_model.and_then(|m| m.request_params.as_ref()) {
+            apply_declared_request_params(&mut payload, params);
+        }
+
+        Ok(self.sanitize_request_for_compat(payload, model_config))
+    }
+
+    /// The request body `stream` sends for this model, whichever API it uses.
+    fn request_payload(
+        &self,
+        model_config: &ModelConfig,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+    ) -> Result<serde_json::Value, ProviderError> {
+        if self.should_use_responses_api_for_provider(&model_config.model_name) {
+            let (wire_model, _) = extract_reasoning_effort(&model_config.model_name);
+            self.responses_payload_for_model(
+                model_config,
+                &wire_model,
+                &model_config.model_name,
+                system,
+                messages,
+                tools,
+            )
+        } else {
+            self.chat_payload(model_config, system, messages, tools)
+        }
     }
 
     fn insert_prompt_cache_key(&self, payload: &mut serde_json::Value) {
@@ -607,11 +687,18 @@ impl OpenAiProvider {
             }
 
             // A model that declares its `reasoning_efforts` gets the closest of
-            // them; a level fixed in the model's request_params stays (N481).
-            if !obj.contains_key("reasoning_effort") {
-                let declared = self
-                    .declared_model(&model_config.model_name)
-                    .and_then(|model| model.reasoning_efforts.as_deref());
+            // them, also where `create_request` already chose a level from the
+            // OpenAI catalog (N783); a level fixed in request_params stays (N481).
+            let declared_model = self.declared_model(&model_config.model_name);
+            let fixed_level = [
+                declared_model.and_then(|model| model.request_params.as_ref()),
+                model_config.request_params.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|params| params.contains_key("reasoning_effort"));
+            if !fixed_level {
+                let declared = declared_model.and_then(|model| model.reasoning_efforts.as_deref());
                 if let (Some(declared), Some(effort)) = (declared, model_config.thinking_effort()) {
                     if let Some(level) = crate::formats::openai::nearest_reasoning_effort(
                         Some(declared),
@@ -834,8 +921,15 @@ impl Provider for OpenAiProvider {
         self.skip_canonical_filtering
     }
 
+    /// The levels the requests for this model carry (N783), read off the
+    /// request itself: declared levels, a level fixed in request_params, the
+    /// OpenAI catalog or the fallback levels, whichever the request ends up with.
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
-        self.declared_model(model_name)?.reasoning_efforts.clone()
+        let model_config = ModelConfig::new(model_name).with_canonical_limits(&self.name);
+        Some(crate::formats::openai::reasoning_efforts_sent(
+            &model_config,
+            |config| self.request_payload(config, "", &[], &[]).ok(),
+        ))
     }
 
     async fn get_known_context_limit(
@@ -950,32 +1044,7 @@ impl Provider for OpenAiProvider {
             )
             .await
         } else {
-            let declared_model = self.declared_model(&model_config.model_name);
-            let thinking_preservation_format =
-                declared_model.and_then(|m| m.thinking_preservation_format);
-            let supports_vision = self.vision_support(model_config).unwrap_or_default();
-
-            let mut payload = create_request_with_options(
-                model_config,
-                system,
-                messages,
-                tools,
-                &ImageFormat::OpenAi,
-                self.supports_streaming,
-                OpenAiFormatOptions {
-                    preserve_thinking_context: self.preserve_thinking_context
-                        || thinking_preservation_format.is_some(),
-                    supports_vision,
-                    thinking_preservation_format,
-                    ..Default::default()
-                },
-            )?;
-
-            if let Some(params) = declared_model.and_then(|m| m.request_params.as_ref()) {
-                apply_declared_request_params(&mut payload, params);
-            }
-
-            let payload = self.sanitize_request_for_compat(payload, model_config);
+            let payload = self.chat_payload(model_config, system, messages, tools)?;
             let mut log = start_log(model_config, &payload)?;
 
             let response = self
@@ -1442,6 +1511,73 @@ mod tests {
                 "high".to_string(),
                 "max".to_string()
             ])
+        );
+    }
+
+    /// N783: whatever the model, every effort is sent as a level the menu
+    /// offers, and every offered level is sent as itself.
+    #[test]
+    fn menu_levels_are_the_levels_sent() {
+        let sent = |provider: &OpenAiProvider, model: &str, effort: ThinkingEffort| {
+            let config = ModelConfig::new(model)
+                .with_canonical_limits(&provider.name)
+                .with_thinking_effort(effort);
+            let payload = provider.request_payload(&config, "", &[], &[]).unwrap();
+            payload
+                .get("reasoning_effort")
+                .or_else(|| payload.pointer("/reasoning/effort"))
+                .and_then(|level| level.as_str())
+                .map(str::to_string)
+        };
+
+        // Unknown reasoning model names, over chat completions and Responses.
+        for base_path in ["chat/completions", "v1/chat/completions"] {
+            let mut provider = make_provider("custom_gateway");
+            provider.base_path = base_path.to_string();
+            let menu = provider.declared_reasoning_efforts("o9-preview").unwrap();
+            assert!(!menu.is_empty(), "{base_path}");
+            for effort in ThinkingEffort::ALL {
+                let level = sent(&provider, "o9-preview", effort).unwrap();
+                assert!(menu.contains(&level), "{base_path} {effort} -> {level}");
+                if menu
+                    .iter()
+                    .any(|offered| offered == effort.reasoning_level())
+                {
+                    assert_eq!(level, effort.reasoning_level(), "{base_path} {effort}");
+                }
+            }
+        }
+
+        // Declared levels win over the OpenAI catalog fallback.
+        let mut provider = make_provider("custom_gateway");
+        provider.base_path = "chat/completions".to_string();
+        let mut model = crate::base::ModelInfo::new("o9-preview");
+        model.reasoning_efforts = Some(vec!["low".into(), "high".into(), "max".into()]);
+        provider.custom_models = Some(vec![model.clone()]);
+        assert_eq!(
+            provider.declared_reasoning_efforts("o9-preview").unwrap(),
+            ["low", "high", "max"]
+        );
+        assert_eq!(
+            sent(&provider, "o9-preview", ThinkingEffort::Max).as_deref(),
+            Some("max")
+        );
+
+        // A level fixed in request_params is the only one sent and offered.
+        model.request_params = Some(HashMap::from([(
+            "reasoning_effort".to_string(),
+            json!("high"),
+        )]));
+        provider.custom_models = Some(vec![model]);
+        assert_eq!(
+            provider.declared_reasoning_efforts("o9-preview").unwrap(),
+            ["high"]
+        );
+
+        // A model whose requests carry no level offers none.
+        assert_eq!(
+            make_provider("custom_gateway").declared_reasoning_efforts("plain-model"),
+            Some(Vec::new())
         );
     }
 
