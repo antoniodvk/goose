@@ -2,7 +2,12 @@ use crate::config::paths::Paths;
 use include_dir::{include_dir, Dir};
 use minijinja::{Environment, Error as MiniJinjaError, Value as MJValue};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tracing::warn;
+
+/// Folder with prompt templates shared by several goose processes that have separate config
+/// folders. A file `<folder>/<name>` goes before `<config>/prompts/<name>` and the built-in text.
+pub const PROMPTS_DIR_ENV: &str = "GOOSE_PROMPTS_DIR";
 
 static CORE_PROMPTS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/prompts");
 
@@ -75,6 +80,79 @@ fn user_prompts_dir() -> PathBuf {
     Paths::config_dir().join("prompts")
 }
 
+fn shared_prompts_dir() -> Option<PathBuf> {
+    std::env::var_os(PROMPTS_DIR_ENV)
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Text of a template file without byte order mark and with LF line ends. A missing, unreadable
+/// or empty file gives `None`, so the next source applies instead of an error or an empty prompt.
+fn read_template_file(path: &Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(raw) => {
+            let text = raw
+                .strip_prefix('\u{feff}')
+                .unwrap_or(&raw)
+                .replace("\r\n", "\n");
+            if text.trim().is_empty() {
+                warn!(file = %path.display(), "prompt template: empty file, next source applies");
+                None
+            } else {
+                Some(text)
+            }
+        }
+        Err(error) => {
+            warn!(file = %path.display(), %error, "prompt template: file not readable, next source applies");
+            None
+        }
+    }
+}
+
+fn custom_content_in(dirs: &[PathBuf], name: &str) -> Option<String> {
+    dirs.iter()
+        .find_map(|dir| read_template_file(&dir.join(name)))
+}
+
+/// The template from a file: the shared folder first, then the config folder of this process.
+fn custom_content(name: &str) -> Option<String> {
+    let dirs: Vec<PathBuf> = shared_prompts_dir()
+        .into_iter()
+        .chain(std::iter::once(user_prompts_dir()))
+        .collect();
+    custom_content_in(&dirs, name)
+}
+
+fn builtin_or_error(name: &str) -> Result<String, MiniJinjaError> {
+    builtin_content(name).ok_or_else(|| {
+        MiniJinjaError::new(
+            minijinja::ErrorKind::TemplateNotFound,
+            format!("Built-in template '{}' not found", name),
+        )
+    })
+}
+
+/// Renders the template from a file when there is one; a file that does not render falls back
+/// to the built-in text with a warning, so one broken file cannot stop every chat.
+fn render_with_fallback<T: Serialize>(
+    name: &str,
+    custom: Option<String>,
+    context: &T,
+) -> Result<String, MiniJinjaError> {
+    if let Some(template_str) = custom {
+        match render_string(&template_str, context) {
+            Ok(rendered) => return Ok(rendered),
+            Err(error) => {
+                warn!(template = name, %error, "prompt template: file does not render, built-in text applies")
+            }
+        }
+    }
+    render_string(&builtin_or_error(name)?, context)
+}
+
 fn is_registered(name: &str) -> bool {
     TEMPLATE_REGISTRY.iter().any(|(n, _)| *n == name)
 }
@@ -119,42 +197,14 @@ pub fn render_template<T: Serialize>(name: &str, context: &T) -> Result<String, 
         ));
     }
 
-    let user_path = user_prompts_dir().join(name);
-    let template_str = if user_path.exists() {
-        std::fs::read_to_string(&user_path).map_err(|e| {
-            MiniJinjaError::new(
-                minijinja::ErrorKind::InvalidOperation,
-                format!("Failed to read user template: {}", e),
-            )
-        })?
-    } else {
-        builtin_content(name).ok_or_else(|| {
-            MiniJinjaError::new(
-                minijinja::ErrorKind::TemplateNotFound,
-                format!("Built-in template '{}' not found", name),
-            )
-        })?
-    };
-
-    render_string(&template_str, context)
+    render_with_fallback(name, custom_content(name), context)
 }
 
 pub fn template_source(name: &str) -> Result<String, MiniJinjaError> {
-    let user_path = user_prompts_dir().join(name);
-    if user_path.exists() {
-        return std::fs::read_to_string(&user_path).map_err(|e| {
-            MiniJinjaError::new(
-                minijinja::ErrorKind::InvalidOperation,
-                format!("Failed to read user template: {}", e),
-            )
-        });
+    match custom_content(name) {
+        Some(text) => Ok(text),
+        None => builtin_or_error(name),
     }
-    builtin_content(name).ok_or_else(|| {
-        MiniJinjaError::new(
-            minijinja::ErrorKind::TemplateNotFound,
-            format!("Built-in template '{}' not found", name),
-        )
-    })
 }
 
 pub fn get_template(name: &str) -> Option<Template> {
@@ -162,12 +212,7 @@ pub fn get_template(name: &str) -> Option<Template> {
 
     let default_content = builtin_content(name)?;
 
-    let user_path = user_prompts_dir().join(name);
-    let user_content = if user_path.exists() {
-        std::fs::read_to_string(&user_path).ok()
-    } else {
-        None
-    };
+    let user_content = custom_content(name);
 
     let is_customized = user_content.is_some();
 
@@ -217,12 +262,7 @@ pub fn list_templates() -> Vec<Template> {
         .filter_map(|(name, description)| {
             let default_content = builtin_content(name)?;
 
-            let user_path = user_prompts_dir().join(name);
-            let user_content = if user_path.exists() {
-                std::fs::read_to_string(&user_path).ok()
-            } else {
-                None
-            };
+            let user_content = custom_content(name);
 
             let is_customized = user_content.is_some();
 
@@ -260,6 +300,56 @@ mod tests {
         let result = render_template("system.md", &context);
         assert!(result.is_ok(), "Should be able to render system.md");
         assert!(!result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn shared_folder_goes_before_the_config_folder() {
+        let shared = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(shared.path().join("a.md"), "\u{feff}shared\r\ntext\r\n").unwrap();
+        std::fs::write(config.path().join("a.md"), "config").unwrap();
+        std::fs::write(config.path().join("b.md"), "config only").unwrap();
+        let dirs = [shared.path().to_path_buf(), config.path().to_path_buf()];
+        assert_eq!(
+            custom_content_in(&dirs, "a.md").as_deref(),
+            Some("shared\ntext\n")
+        );
+        assert_eq!(
+            custom_content_in(&dirs, "b.md").as_deref(),
+            Some("config only")
+        );
+        assert_eq!(custom_content_in(&dirs, "c.md"), None);
+    }
+
+    #[test]
+    fn unusable_file_leaves_the_next_source_in_place() {
+        let shared = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(shared.path().join("empty.md"), " \r\n").unwrap();
+        std::fs::write(shared.path().join("binary.md"), [0xff, 0xfe, 0x00, 0xd8]).unwrap();
+        std::fs::write(config.path().join("empty.md"), "config").unwrap();
+        let dirs = [shared.path().to_path_buf(), config.path().to_path_buf()];
+        assert_eq!(
+            custom_content_in(&dirs, "empty.md").as_deref(),
+            Some("config")
+        );
+        assert_eq!(custom_content_in(&dirs, "binary.md"), None);
+    }
+
+    #[test]
+    fn file_that_does_not_render_falls_back_to_the_built_in_text() {
+        let context: HashMap<String, String> = HashMap::new();
+        let built_in = render_with_fallback("system.md", None, &context).unwrap();
+        let broken = Some("{% if %} never closed".to_string());
+        assert_eq!(
+            render_with_fallback("system.md", broken, &context).unwrap(),
+            built_in
+        );
+        let custom = Some("from file".to_string());
+        assert_eq!(
+            render_with_fallback("system.md", custom, &context).unwrap(),
+            "from file"
+        );
     }
 
     #[test]
