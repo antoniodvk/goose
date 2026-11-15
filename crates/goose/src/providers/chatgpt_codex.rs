@@ -43,7 +43,7 @@ const ISSUER: &str = "https://auth.openai.com";
 pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex";
 const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 // openai/codex `backend-client`: `PathStyle::ChatGptApi` => `{base_url}/wham/usage`.
-const CHATGPT_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+pub(crate) const CHATGPT_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 const OAUTH_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
 // Canonical localhost callback port for Codex OAuth (default localhost:1455 per OpenAI docs).
 // https://developers.openai.com/codex/auth/
@@ -1114,10 +1114,12 @@ async fn fetch_catalog_with_token(
 }
 
 /// `GET /wham/usage` with the account of the token (see
-/// `goose_providers::usage::parse_chatgpt_usage` for the sources).
-async fn fetch_usage_with_token(
+/// `goose_providers::usage::parse_chatgpt_usage` for the sources). Shared
+/// with `codex-acp`, which reads the token from Codex's own login.
+pub(crate) async fn fetch_usage_with_token(
     usage_endpoint: &str,
-    token_data: &TokenData,
+    access_token: &str,
+    account_id: Option<&str>,
 ) -> Result<AccountUsage, ProviderError> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
@@ -1127,10 +1129,8 @@ async fn fetch_usage_with_token(
         .build()
         .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
 
-    let mut request = client
-        .get(usage_endpoint)
-        .bearer_auth(&token_data.access_token);
-    if let Some(account_id) = &token_data.account_id {
+    let mut request = client.get(usage_endpoint).bearer_auth(access_token);
+    if let Some(account_id) = account_id {
         request = request.header("chatgpt-account-id", account_id);
     }
 
@@ -1310,9 +1310,13 @@ impl Provider for ChatGptCodexProvider {
 
     async fn fetch_usage(&self) -> Result<Option<AccountUsage>, ProviderError> {
         let token_data = self.auth_provider.get_request_token().await?;
-        fetch_usage_with_token(CHATGPT_USAGE_ENDPOINT, &token_data)
-            .await
-            .map(Some)
+        fetch_usage_with_token(
+            CHATGPT_USAGE_ENDPOINT,
+            &token_data.access_token,
+            token_data.account_id.as_deref(),
+        )
+        .await
+        .map(Some)
     }
 }
 
@@ -2048,9 +2052,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let usage = fetch_usage_with_token(&format!("{}/wham/usage", server.uri()), &usage_token())
-            .await
-            .unwrap();
+        let usage = fetch_usage_with_token(
+            &format!("{}/wham/usage", server.uri()),
+            &usage_token().access_token,
+            usage_token().account_id.as_deref(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(usage.plan.as_deref(), Some("plus"));
         assert_eq!(usage.windows[0].used_percent, Some(42.0));
@@ -2065,9 +2073,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let error = fetch_usage_with_token(&format!("{}/wham/usage", server.uri()), &usage_token())
-            .await
-            .unwrap_err();
+        let error = fetch_usage_with_token(
+            &format!("{}/wham/usage", server.uri()),
+            &usage_token().access_token,
+            usage_token().account_id.as_deref(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(error, ProviderError::Authentication(_)));
     }

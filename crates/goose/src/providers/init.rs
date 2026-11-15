@@ -187,6 +187,11 @@ async fn init_registry() -> RwLock<ProviderRegistry> {
             Some(registrations::xai_oauth_inventory()),
         );
     });
+    // Agent providers start their agent when created; read their usage without it
+    registry.set_usage_query(
+        super::codex_acp::CODEX_ACP_PROVIDER_NAME,
+        super::codex_acp::usage_query(),
+    );
     // Register cleanup functions for providers with cached state
     registry.set_cleanup(
         "github_copilot",

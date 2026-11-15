@@ -624,14 +624,23 @@ impl GooseAcpAgent {
         &self,
         req: ProviderUsageRequest,
     ) -> Result<ProviderUsageResponse, agent_client_protocol::Error> {
-        let provider = self
-            .create_provider(&req.provider_id)
+        // A registered usage query answers without creating the provider,
+        // which for an agent provider would start its agent process.
+        let usage_query = crate::providers::get_from_registry(&req.provider_id)
             .await
-            .internal_err_ctx("Failed to initialize provider")?;
-        let usage = provider
-            .fetch_usage()
-            .await
-            .map_err(|error| provider_query_error(&req.provider_id, "provider usage", error))?;
+            .ok()
+            .and_then(|entry| entry.usage_query());
+        let usage = match usage_query {
+            Some(usage_query) => usage_query().await,
+            None => {
+                let provider = self
+                    .create_provider(&req.provider_id)
+                    .await
+                    .internal_err_ctx("Failed to initialize provider")?;
+                provider.fetch_usage().await
+            }
+        }
+        .map_err(|error| provider_query_error(&req.provider_id, "provider usage", error))?;
 
         Ok(ProviderUsageResponse {
             provider_id: req.provider_id,

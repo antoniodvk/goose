@@ -7,7 +7,9 @@ use super::inventory::{InventoryIdentityInput, InventoryRegistration, InventoryR
 use crate::config::{DeclarativeProviderConfig, ExtensionConfig};
 use anyhow::Result;
 use futures::future::BoxFuture;
+use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
+use goose_providers::usage::AccountUsage;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +27,12 @@ pub type ProviderConstructor = Arc<
 
 pub type ProviderCleanup = Arc<dyn Fn() -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
+/// Reads a provider's account usage without creating the provider, for
+/// providers whose construction is expensive (an agent provider starts its
+/// agent process): `providers/usage` asks this first.
+pub type ProviderUsageQuery =
+    Arc<dyn Fn() -> BoxFuture<'static, Result<Option<AccountUsage>, ProviderError>> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ProviderEntry {
     metadata: ProviderMetadata,
@@ -32,6 +40,7 @@ pub struct ProviderEntry {
     pub(crate) inventory_identity: super::inventory::InventoryIdentityResolver,
     pub(crate) inventory_configured: super::inventory::InventoryConfiguredResolver,
     pub(crate) cleanup: Option<ProviderCleanup>,
+    usage_query: Option<ProviderUsageQuery>,
     provider_type: ProviderType,
     catalog_provider_id: Option<String>,
     supports_inventory_refresh: bool,
@@ -56,6 +65,10 @@ impl ProviderEntry {
 
     pub fn runs_own_tool_loop(&self) -> bool {
         self.runs_own_tool_loop
+    }
+
+    pub fn usage_query(&self) -> Option<ProviderUsageQuery> {
+        self.usage_query.clone()
     }
 
     pub fn supports_inventory_refresh(&self) -> bool {
@@ -171,6 +184,7 @@ impl ProviderRegistry {
                 inventory_identity: inventory.identity,
                 inventory_configured: inventory.configured,
                 cleanup: None,
+                usage_query: None,
                 provider_type: if preferred {
                     ProviderType::Preferred
                 } else {
@@ -343,6 +357,7 @@ impl ProviderRegistry {
                 inventory_identity: Arc::new(inventory_identity),
                 inventory_configured: inventory_configured.unwrap_or(default_inventory_configured),
                 cleanup: None,
+                usage_query: None,
                 provider_type,
                 catalog_provider_id: config.catalog_provider_id.clone(),
                 supports_inventory_refresh,
@@ -357,6 +372,12 @@ impl ProviderRegistry {
     pub fn set_cleanup(&mut self, name: &str, cleanup: ProviderCleanup) {
         if let Some(entry) = self.entries.get_mut(name) {
             entry.cleanup = Some(cleanup);
+        }
+    }
+
+    pub fn set_usage_query(&mut self, name: &str, usage_query: ProviderUsageQuery) {
+        if let Some(entry) = self.entries.get_mut(name) {
+            entry.usage_query = Some(usage_query);
         }
     }
 

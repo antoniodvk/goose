@@ -2,6 +2,10 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use goose_providers::errors::ProviderError;
+use goose_providers::usage::AccountUsage;
 
 use crate::acp::{
     extension_configs_to_mcp_servers, AcpProvider, AcpProviderConfig, ACP_CURRENT_MODEL,
@@ -12,6 +16,8 @@ use crate::providers::base::{
     current_working_dir, ProviderDef, ProviderDescriptor, ProviderMetadata,
 };
 use crate::providers::catalog::ProviderSetupMetadata;
+use crate::providers::chatgpt_codex::{fetch_usage_with_token, CHATGPT_USAGE_ENDPOINT};
+use crate::providers::provider_registry::ProviderUsageQuery;
 
 pub(crate) const CODEX_ACP_PROVIDER_NAME: &str = "codex-acp";
 const CODEX_ACP_DOC_URL: &str = "https://github.com/agentclientprotocol/codex-acp";
@@ -94,6 +100,193 @@ impl ProviderDef for CodexAcpProvider {
             let metadata = Self::metadata();
             AcpProvider::connect(metadata.name, goose_mode, provider_config).await
         })
+    }
+}
+
+/// The login Codex keeps for itself in `$CODEX_HOME/auth.json` (default
+/// `~/.codex`): ChatGPT sign-in tokens, or an API key.
+#[derive(serde::Deserialize)]
+struct CodexLogin {
+    #[serde(default)]
+    auth_mode: Option<String>,
+    #[serde(default)]
+    tokens: Option<CodexLoginTokens>,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexLoginTokens {
+    access_token: String,
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
+fn codex_home() -> Option<PathBuf> {
+    match std::env::var_os("CODEX_HOME") {
+        Some(home) if !home.is_empty() => Some(PathBuf::from(home)),
+        _ => dirs::home_dir().map(|home| home.join(".codex")),
+    }
+}
+
+/// Subscription usage of the ChatGPT account Codex is signed in with, read
+/// without starting codex-acp (`providers/usage` would otherwise launch the
+/// agent). `None` when Codex has no ChatGPT sign-in (API key, no login): an
+/// API key has no subscription windows. The file is only read; a token Codex
+/// has not refreshed yet comes back as `Authentication`, and Codex refreshes
+/// it on its next run.
+pub(crate) async fn usage_from_codex_login(
+    codex_home: Option<PathBuf>,
+    usage_endpoint: &str,
+) -> Result<Option<AccountUsage>, ProviderError> {
+    let Some(codex_home) = codex_home else {
+        return Ok(None);
+    };
+    let text = match tokio::fs::read_to_string(codex_home.join("auth.json")).await {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ProviderError::ExecutionError(format!(
+                "Codex login unreadable: {error}"
+            )))
+        }
+    };
+    let login: CodexLogin = serde_json::from_str(&text).map_err(|error| {
+        ProviderError::ExecutionError(format!("Codex login unreadable: {error}"))
+    })?;
+    if login.auth_mode.as_deref() == Some("apikey") {
+        return Ok(None);
+    }
+    let Some(tokens) = login.tokens else {
+        return Ok(None);
+    };
+    fetch_usage_with_token(
+        usage_endpoint,
+        &tokens.access_token,
+        tokens.account_id.as_deref(),
+    )
+    .await
+    .map(Some)
+}
+
+pub(crate) fn usage_query() -> ProviderUsageQuery {
+    Arc::new(|| Box::pin(usage_from_codex_login(codex_home(), CHATGPT_USAGE_ENDPOINT)))
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn login_dir(login: serde_json::Value) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("auth.json"), login.to_string()).unwrap();
+        directory
+    }
+
+    #[tokio::test]
+    async fn usage_is_read_with_codex_chatgpt_login() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/wham/usage"))
+            .and(header("authorization", "Bearer access-token"))
+            .and(header("chatgpt-account-id", "account-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "plan_type": "plus",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 42,
+                        "limit_window_seconds": 18000,
+                        "reset_at": 1788652800
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let directory = login_dir(json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": "id",
+                "access_token": "access-token",
+                "refresh_token": "refresh",
+                "account_id": "account-1"
+            }
+        }));
+        let before = std::fs::read(directory.path().join("auth.json")).unwrap();
+
+        let usage = usage_from_codex_login(
+            Some(directory.path().to_path_buf()),
+            &format!("{}/wham/usage", server.uri()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(usage.plan.as_deref(), Some("plus"));
+        assert_eq!(usage.windows[0].used_percent, Some(42.0));
+        assert_eq!(
+            std::fs::read(directory.path().join("auth.json")).unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_login_has_no_usage_and_asks_nothing() {
+        let server = MockServer::start().await;
+        let directory = login_dir(json!({
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "key",
+            "tokens": null
+        }));
+
+        let usage = usage_from_codex_login(
+            Some(directory.path().to_path_buf()),
+            &format!("{}/wham/usage", server.uri()),
+        )
+        .await
+        .unwrap();
+
+        assert!(usage.is_none());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_login_has_no_usage() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let usage = usage_from_codex_login(
+            Some(directory.path().to_path_buf()),
+            "http://127.0.0.1:9/wham/usage",
+        )
+        .await
+        .unwrap();
+
+        assert!(usage.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejected_login_is_authentication() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/wham/usage"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let directory = login_dir(json!({
+            "auth_mode": "chatgpt",
+            "tokens": { "access_token": "expired", "refresh_token": "r" }
+        }));
+
+        let error = usage_from_codex_login(
+            Some(directory.path().to_path_buf()),
+            &format!("{}/wham/usage", server.uri()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ProviderError::Authentication(_)));
     }
 }
 
