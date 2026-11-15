@@ -70,10 +70,11 @@ impl ProviderManager {
             return Ok((self.shared(name, &entry).await?, false));
         }
 
-        let extensions = EnabledExtensionsState::extensions_or_default(
+        let extensions = resolve_for_agent(EnabledExtensionsState::extensions_or_default(
             Some(&session.extension_data),
             Config::global(),
-        );
+        ))
+        .await;
         let provider = entry
             .create_with_working_dir(extensions, session.working_dir.clone())
             .await?;
@@ -129,6 +130,25 @@ impl ProviderManager {
     }
 }
 
+/// A session-bound provider that runs its own agent (claude-acp, codex-acp, antigravity-acp …) starts the
+/// stdio and HTTP extensions itself, so it must get them as goose would start them: secrets from
+/// `env_keys` filled in and `${VAR}` in headers and URLs substituted (`ExtensionConfig::resolve`, the same
+/// step `ExtensionManager::start` takes). Unresolved, a server like Context7 started without its key.
+/// An extension whose secret is missing is left out, as goose's own start of it would fail too.
+async fn resolve_for_agent(
+    extensions: Vec<crate::agents::extension::ExtensionConfig>,
+) -> Vec<crate::agents::extension::ExtensionConfig> {
+    let mut resolved = Vec::with_capacity(extensions.len());
+    for extension in extensions {
+        let name = extension.name();
+        match extension.resolve(Config::global()).await {
+            Ok(extension) => resolved.push(extension),
+            Err(e) => warn!("Leaving extension {name} out for the agent provider: {e}"),
+        }
+    }
+    resolved
+}
+
 pub fn provider_name_for(session: &Session) -> Result<String> {
     match &session.provider_name {
         Some(name) => Ok(name.clone()),
@@ -149,4 +169,32 @@ pub fn model_config_for(session: &Session) -> Result<ModelConfig> {
         .map_err(|_| anyhow!("Could not resolve model config: missing model"))?;
     crate::model_config::model_config_from_user_config(&provider_name, &model_name)
         .map_err(|e| anyhow!("Could not resolve model config: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::extension::ExtensionConfig;
+
+    #[tokio::test]
+    async fn agent_providers_get_extension_secrets_filled_in() {
+        // merge_environments reads the process environment before the secret store.
+        std::env::set_var("C314_AGENT_SECRET", "ctx7sk-test");
+        let extension: ExtensionConfig = serde_json::from_value(serde_json::json!({
+            "type": "stdio",
+            "name": "context7",
+            "cmd": "npx",
+            "args": ["-y", "@upstash/context7-mcp"],
+            "env_keys": ["C314_AGENT_SECRET"],
+            "timeout": 300
+        }))
+        .unwrap();
+
+        let resolved = resolve_for_agent(vec![extension]).await;
+
+        let servers = crate::acp::extension_configs_to_mcp_servers(&resolved);
+        let json = serde_json::to_string(&servers).unwrap();
+        assert!(json.contains("C314_AGENT_SECRET"), "{json}");
+        assert!(json.contains("ctx7sk-test"), "{json}");
+    }
 }
