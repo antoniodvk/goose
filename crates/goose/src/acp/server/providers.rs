@@ -630,8 +630,16 @@ impl GooseAcpAgent {
             .await
             .ok()
             .and_then(|entry| entry.usage_query());
+        let agent = self
+            .provider_inventory
+            .find_entry_for_provider(&req.provider_id)
+            .await
+            .is_some_and(|entry| entry.acp);
         let usage = match usage_query {
             Some(usage_query) => usage_query().await,
+            // An agent provider has no usage of its own beyond a registered
+            // query; creating it only to answer None would start the agent.
+            None if agent => Ok(None),
             None => {
                 let provider = self
                     .create_provider(&req.provider_id)
