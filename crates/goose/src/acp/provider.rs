@@ -16,7 +16,7 @@ use agent_client_protocol_schema::v1::{AGENT_METHOD_NAMES, CLIENT_METHOD_NAMES};
 use anyhow::{Context, Result};
 use async_stream::try_stream;
 use futures::future::BoxFuture;
-use goose_providers::conversation::token_usage::{ProviderUsage, Usage};
+use goose_providers::conversation::token_usage::{CostSource, ProviderUsage, Usage};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock as RmcpContent, Role, Tool};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -335,6 +335,43 @@ fn air_async_tasks_capability_meta() -> serde_json::Map<String, serde_json::Valu
 /// typed `SessionUpdate` knows none of them, so they are taken untyped.
 const ASYNC_TASK_UPDATE_PREFIX: &str = "async_task_";
 
+/// Cost the agent itself reports in `usage_update.cost` (claude-agent-acp:
+/// `total_cost_usd`). Agents report a running total for their session, goose
+/// books per-turn amounts, so the turn's share is the difference to what was
+/// already handed over.
+#[derive(Default)]
+struct AgentCost {
+    /// Latest running total the agent reported (USD).
+    reported: Option<f64>,
+    /// Running total already handed to goose as provider-reported cost.
+    charged: Option<f64>,
+    /// The agent session was resumed: its first total already contains earlier
+    /// turns that goose has booked, so that turn keeps the estimate.
+    resumed: bool,
+}
+
+impl AgentCost {
+    fn report(&mut self, amount: f64) {
+        if amount.is_finite() && amount >= 0.0 {
+            self.reported = Some(amount);
+        }
+    }
+
+    /// Cost of the turn that just ended, or `None` when the agent reported no
+    /// new amount (goose then estimates by list price as for any provider).
+    fn take_turn_cost(&mut self) -> Option<f64> {
+        let reported = self.reported?;
+        let delta = match self.charged {
+            None if self.resumed => None,
+            None => Some(reported),
+            Some(previous) if reported < previous => Some(reported),
+            Some(previous) => Some(reported - previous),
+        };
+        self.charged = Some(reported);
+        delta.filter(|amount| *amount > 0.0)
+    }
+}
+
 /// Request that stops an AIR background task, `{ sessionId, asyncTaskId }`.
 pub(crate) const ASYNC_TASK_STOP_METHOD: &str = "_session/async_task/stop";
 
@@ -413,6 +450,8 @@ pub struct AcpProvider {
     /// Latest `usage_update._meta["_claude/rateLimit"]` (plan rate-limit status
     /// and reset time from claude-agent-acp), kept verbatim.
     rate_limit: Arc<Mutex<Option<serde_json::Value>>>,
+    /// Cost the agent reports itself, see [`AgentCost`].
+    agent_cost: Arc<Mutex<AgentCost>>,
 
     /// Config option id used to select the model, if this agent supports it.
     model_config_option_id: Option<String>,
@@ -527,6 +566,7 @@ impl AcpProvider {
         let context_size = Arc::new(AtomicU64::new(0));
         let context_used = Arc::new(AtomicU64::new(0));
         let rate_limit = Arc::new(Mutex::new(None));
+        let agent_cost = Arc::new(Mutex::new(AgentCost::default()));
         let effort = AcpEffortState::new();
         let async_tasks = AcpAsyncTasks::new();
         let client_loop = AcpClientLoop {
@@ -538,6 +578,7 @@ impl AcpProvider {
             context_size: context_size.clone(),
             context_used: context_used.clone(),
             rate_limit: rate_limit.clone(),
+            agent_cost: agent_cost.clone(),
             effort: effort.clone(),
             async_tasks: async_tasks.clone(),
         };
@@ -584,6 +625,7 @@ impl AcpProvider {
             context_size,
             context_used,
             rate_limit,
+            agent_cost,
             model_config_option_id,
             applied_model: Arc::new(Mutex::new(applied_model)),
             effort,
@@ -845,6 +887,9 @@ impl Provider for AcpProvider {
             .load_session(SessionId::new(session_id))
             .await
             .map_err(|error| ProviderError::RequestFailed(error.to_string()))?;
+        if let Ok(mut cost) = self.agent_cost.lock() {
+            cost.resumed = true;
+        }
         let applied_model = self.model_config_option_id.as_ref().and_then(|config_id| {
             loaded
                 .response
@@ -1104,6 +1149,7 @@ impl Provider for AcpProvider {
         let model_name = model_config.model_name.clone();
         let context_used = self.context_used.clone();
         context_used.store(0, Ordering::Relaxed);
+        let agent_cost = self.agent_cost.clone();
 
         Ok(Box::pin(try_stream! {
             let mut suppress_text = false;
@@ -1251,7 +1297,7 @@ impl Provider for AcpProvider {
                                 0 => usage.total_tokens,
                                 used => used,
                             };
-                            let provider_usage = ProviderUsage::new(
+                            let mut provider_usage = ProviderUsage::new(
                                 model_name.clone(),
                                 Usage::new(
                                     Some(usage.input_tokens as i32),
@@ -1259,6 +1305,10 @@ impl Provider for AcpProvider {
                                     Some(total_tokens as i32),
                                 ),
                             );
+                            let turn_cost = agent_cost.lock().ok().and_then(|mut guard| guard.take_turn_cost());
+                            if let Some(cost) = turn_cost {
+                                provider_usage = provider_usage.with_cost(cost, CostSource::ProviderReported);
+                            }
                             yield (None, Some(provider_usage));
                         }
                         break;
@@ -1329,6 +1379,7 @@ struct AcpClientLoop {
     context_size: Arc<AtomicU64>,
     context_used: Arc<AtomicU64>,
     rate_limit: Arc<Mutex<Option<serde_json::Value>>>,
+    agent_cost: Arc<Mutex<AgentCost>>,
     effort: AcpEffortState,
     async_tasks: AcpAsyncTasks,
 }
@@ -1388,6 +1439,7 @@ impl AcpClientLoop {
             context_size,
             context_used,
             rate_limit,
+            agent_cost,
             effort,
             async_tasks,
         } = self;
@@ -1424,6 +1476,7 @@ impl AcpClientLoop {
                     let context_size = context_size.clone();
                     let context_used = context_used.clone();
                     let rate_limit = rate_limit.clone();
+                    let agent_cost = agent_cost.clone();
                     let session_state = session_state.clone();
                     async move |notification: SessionNotification, _cx| {
                         let is_active_session =
@@ -1471,6 +1524,13 @@ impl AcpClientLoop {
                             SessionUpdate::UsageUpdate(usage) => {
                                 context_size.store(usage.size, Ordering::Relaxed);
                                 context_used.store(usage.used, Ordering::Relaxed);
+                                if let Some(cost) = usage.cost.as_ref() {
+                                    if cost.currency.eq_ignore_ascii_case("USD") {
+                                        if let Ok(mut guard) = agent_cost.lock() {
+                                            guard.report(cost.amount);
+                                        }
+                                    }
+                                }
                                 if let Some(signal) = usage
                                     .meta
                                     .as_ref()
@@ -2992,6 +3052,7 @@ mod tests {
                 context_size: Arc::new(AtomicU64::new(0)),
                 context_used: Arc::new(AtomicU64::new(0)),
                 rate_limit: Arc::new(Mutex::new(None)),
+                agent_cost: Arc::new(Mutex::new(AgentCost::default())),
                 model_config_option_id: None,
                 applied_model: Arc::new(Mutex::new(None)),
                 effort: AcpEffortState::new(),
@@ -5263,5 +5324,44 @@ mod tests {
                 "goose.acp.kind serialized wrong for kind={kind:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_cost_tests {
+    use super::AgentCost;
+
+    #[test]
+    fn turn_cost_is_the_difference_of_the_running_total() {
+        let mut cost = AgentCost::default();
+        assert_eq!(cost.take_turn_cost(), None);
+        cost.report(0.25);
+        assert_eq!(cost.take_turn_cost(), Some(0.25));
+        cost.report(0.40);
+        let second = cost.take_turn_cost().unwrap();
+        assert!((second - 0.15).abs() < 1e-9);
+        // No new report: nothing to book, goose keeps its estimate.
+        assert_eq!(cost.take_turn_cost(), None);
+    }
+
+    #[test]
+    fn resumed_session_keeps_the_estimate_for_its_first_turn() {
+        let mut cost = AgentCost {
+            resumed: true,
+            ..AgentCost::default()
+        };
+        cost.report(3.0);
+        assert_eq!(cost.take_turn_cost(), None);
+        cost.report(3.5);
+        assert_eq!(cost.take_turn_cost(), Some(0.5));
+    }
+
+    #[test]
+    fn a_smaller_total_starts_over() {
+        let mut cost = AgentCost::default();
+        cost.report(2.0);
+        cost.take_turn_cost();
+        cost.report(0.5);
+        assert_eq!(cost.take_turn_cost(), Some(0.5));
     }
 }
