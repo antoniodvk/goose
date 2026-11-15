@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 use crate::{
     canonical::{
@@ -787,6 +787,23 @@ pub trait Provider: MaybeSend + MaybeSync {
     /// Providers without an asynchronous capability source return `None`.
     fn subscribe_thinking_effort_support(&self) -> Option<watch::Receiver<ThinkingEffortSupport>> {
         None
+    }
+
+    /// Subscribe to the background tasks the provider's agent runs beyond a
+    /// turn (ACP agents that report AIR `asyncTasks`). Each item is the raw
+    /// `update` of an `async_task_*` session update, with every field the
+    /// agent sent. Providers without background tasks return `None`.
+    fn subscribe_async_tasks(&self) -> Option<broadcast::Receiver<Value>> {
+        None
+    }
+
+    /// Stop a background task the provider's agent reported, returning the
+    /// agent's response unchanged.
+    async fn stop_async_task(&self, _async_task_id: &str) -> Result<Value, ProviderError> {
+        Err(ProviderError::NotImplemented(format!(
+            "{} runs no background tasks",
+            self.get_name()
+        )))
     }
 
     /// Forward a thinking-effort selection to the provider. Returns `Ok(true)`

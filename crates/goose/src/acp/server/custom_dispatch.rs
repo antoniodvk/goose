@@ -18,6 +18,10 @@ impl GooseAcpAgent {
                     agent_client_protocol::Error::internal_error().data(e.to_string())
                 });
             }
+            // The agent's own request, passed through untyped like its response.
+            if async_tasks::is_stop_async_task_method(method) {
+                return self.on_stop_async_task(params).await;
+            }
 
             self.handle_custom_request(cx, method, params).await
         }

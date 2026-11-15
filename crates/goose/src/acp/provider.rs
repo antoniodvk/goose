@@ -12,7 +12,7 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, Client, ConnectionTo, Handled, UntypedMessage};
 use agent_client_protocol_schema::v1::Usage as AcpUsage;
-use agent_client_protocol_schema::v1::AGENT_METHOD_NAMES;
+use agent_client_protocol_schema::v1::{AGENT_METHOD_NAMES, CLIENT_METHOD_NAMES};
 use anyhow::{Context, Result};
 use async_stream::try_stream;
 use futures::future::BoxFuture;
@@ -317,6 +317,79 @@ pub(crate) fn reported_auth_status(provider_id: &str) -> Option<serde_json::Valu
         .and_then(|reported| reported.get(provider_id).cloned())
 }
 
+/// Client capability that makes AIR agents (codex-acp `clientSupportsAirCapability`,
+/// claude-agent-acp `async-tasks.js`) report background tasks as `async_task_*`
+/// session updates. No other AIR capability is advertised: each changes how the
+/// agent shapes the rest of its session.
+fn air_async_tasks_capability_meta() -> serde_json::Map<String, serde_json::Value> {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "jetbrains".to_string(),
+        serde_json::json!({ "air": { "version": 1, "capabilities": ["asyncTasks"] } }),
+    );
+    meta
+}
+
+/// Session updates of AIR background tasks (`async_task_spawned`,
+/// `async_task_progress`, `async_task_state_update`) share this prefix. The
+/// typed `SessionUpdate` knows none of them, so they are taken untyped.
+const ASYNC_TASK_UPDATE_PREFIX: &str = "async_task_";
+
+/// Request that stops an AIR background task, `{ sessionId, asyncTaskId }`.
+pub(crate) const ASYNC_TASK_STOP_METHOD: &str = "_session/async_task/stop";
+
+/// The background tasks of one agent connection: their updates for every
+/// subscriber, and the connection a stop request goes out on. The stop does
+/// not queue behind `handle_requests`, which waits out a running prompt.
+#[derive(Clone)]
+struct AcpAsyncTasks {
+    updates: tokio::sync::broadcast::Sender<serde_json::Value>,
+    agent_cx: Arc<std::sync::OnceLock<ConnectionTo<Agent>>>,
+}
+
+impl AcpAsyncTasks {
+    fn new() -> Self {
+        let (updates, _) = tokio::sync::broadcast::channel(64);
+        Self {
+            updates,
+            agent_cx: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+}
+
+/// Publishes the `update` of an `async_task_*` session update that belongs to
+/// the active session. Returns false for every other notification, which stays
+/// unhandled for the typed receivers.
+fn publish_async_task_update(
+    active_id: &Mutex<Option<SessionId>>,
+    updates: &tokio::sync::broadcast::Sender<serde_json::Value>,
+    notification: &UntypedMessage,
+) -> bool {
+    if notification.method() != CLIENT_METHOD_NAMES.session_update {
+        return false;
+    }
+    let params = notification.params();
+    let Some(update) = params.get("update").filter(|update| {
+        update
+            .get("sessionUpdate")
+            .and_then(|kind| kind.as_str())
+            .is_some_and(|kind| kind.starts_with(ASYNC_TASK_UPDATE_PREFIX))
+    }) else {
+        return false;
+    };
+    let session_id = params.get("sessionId").and_then(|id| id.as_str());
+    let is_active_session = active_id.lock().is_ok_and(|active| {
+        active
+            .as_ref()
+            .is_none_or(|id| Some(id.0.as_ref()) == session_id)
+    });
+    if is_active_session {
+        // No subscriber is not an error: nobody shows this agent's tasks.
+        let _ = updates.send(update.clone());
+    }
+    true
+}
+
 pub struct AcpProvider {
     name: String,
     goose_mode: Arc<Mutex<GooseMode>>,
@@ -354,6 +427,8 @@ pub struct AcpProvider {
     /// value, it tracks the agent resetting its own effort (e.g. on a model
     /// switch), so the persisted value is re-applied when that happens.
     effort: AcpEffortState,
+
+    async_tasks: AcpAsyncTasks,
 
     tx: Option<mpsc::Sender<ClientRequest>>,
     cancel_tx: Option<oneshot::Sender<()>>,
@@ -453,6 +528,7 @@ impl AcpProvider {
         let context_used = Arc::new(AtomicU64::new(0));
         let rate_limit = Arc::new(Mutex::new(None));
         let effort = AcpEffortState::new();
+        let async_tasks = AcpAsyncTasks::new();
         let client_loop = AcpClientLoop {
             provider_name: name.clone(),
             config,
@@ -463,6 +539,7 @@ impl AcpProvider {
             context_used: context_used.clone(),
             rate_limit: rate_limit.clone(),
             effort: effort.clone(),
+            async_tasks: async_tasks.clone(),
         };
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let loop_thread = spawn_client_loop(run(client_loop, rx, init_tx, cancel_rx));
@@ -510,6 +587,7 @@ impl AcpProvider {
             model_config_option_id,
             applied_model: Arc::new(Mutex::new(applied_model)),
             effort,
+            async_tasks,
             tx: client_loop_guard.tx.take(),
             cancel_tx: client_loop_guard.cancel_tx.take(),
             loop_thread: client_loop_guard.thread.take(),
@@ -846,6 +924,31 @@ impl Provider for AcpProvider {
 
     fn subscribe_thinking_effort_support(&self) -> Option<watch::Receiver<ThinkingEffortSupport>> {
         Some(self.effort.updates.subscribe())
+    }
+
+    fn subscribe_async_tasks(&self) -> Option<tokio::sync::broadcast::Receiver<serde_json::Value>> {
+        Some(self.async_tasks.updates.subscribe())
+    }
+
+    async fn stop_async_task(
+        &self,
+        async_task_id: &str,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let cx = self.async_tasks.agent_cx.get().cloned().ok_or_else(|| {
+            ProviderError::RequestFailed("ACP agent connection is not ready".into())
+        })?;
+        let request = UntypedMessage::new(
+            ASYNC_TASK_STOP_METHOD,
+            serde_json::json!({
+                "sessionId": self.acp_session_id(),
+                "asyncTaskId": async_task_id,
+            }),
+        )
+        .map_err(|error| ProviderError::RequestFailed(error.to_string()))?;
+        cx.send_request(request)
+            .block_task()
+            .await
+            .map_err(provider_error_from_acp)
     }
 
     async fn set_thinking_effort(
@@ -1227,6 +1330,7 @@ struct AcpClientLoop {
     context_used: Arc<AtomicU64>,
     rate_limit: Arc<Mutex<Option<serde_json::Value>>>,
     effort: AcpEffortState,
+    async_tasks: AcpAsyncTasks,
 }
 
 impl AcpClientLoop {
@@ -1285,6 +1389,7 @@ impl AcpClientLoop {
             context_used,
             rate_limit,
             effort,
+            async_tasks,
         } = self;
         let notification_callback = config.notification_callback.clone();
         let reverse_modes = reverse_mode_mapping(&config.mode_mapping);
@@ -1292,6 +1397,24 @@ impl AcpClientLoop {
 
         Client
             .builder()
+            // Ahead of the typed receiver: an `async_task_*` update fails to parse
+            // as `SessionNotification`, and a parse error is not passed on.
+            .on_receive_notification(
+                {
+                    let active_id = session_state.active_id.clone();
+                    let updates = async_tasks.updates.clone();
+                    async move |notification: UntypedMessage, cx| {
+                        if publish_async_task_update(&active_id, &updates, &notification) {
+                            return Ok(Handled::Yes);
+                        }
+                        Ok(Handled::No {
+                            message: (notification, cx),
+                            retry: false,
+                        })
+                    }
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
             .on_receive_notification(
                 {
                     let prompt_response_tx = prompt_response_tx.clone();
@@ -1528,6 +1651,7 @@ impl AcpClientLoop {
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
+                let _ = async_tasks.agent_cx.set(cx.clone());
                 handle_requests(
                     config,
                     goose_mode,
@@ -1645,7 +1769,7 @@ async fn handle_requests(
 ) -> Result<(), agent_client_protocol::Error> {
     let mut init_tx = Some(init_tx);
 
-    let client_capabilities = ClientCapabilities::new();
+    let client_capabilities = ClientCapabilities::new().meta(air_async_tasks_capability_meta());
     let init_response: InitializeResponse = cx
         .send_request(
             InitializeRequest::new(ProtocolVersion::V1).client_capabilities(client_capabilities),
@@ -2639,6 +2763,206 @@ mod tests {
         assert!(!record_auth_status_update("test-auth-agent", &other));
     }
 
+    fn session_update(session_id: &str, update: serde_json::Value) -> UntypedMessage {
+        UntypedMessage::new(
+            CLIENT_METHOD_NAMES.session_update,
+            serde_json::json!({ "sessionId": session_id, "update": update }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn async_task_update_of_the_active_session_is_published_whole() {
+        let active_id = Mutex::new(Some(SessionId::new("agent-session")));
+        let (updates, mut rx) = tokio::sync::broadcast::channel(8);
+        let spawned = serde_json::json!({
+            "sessionUpdate": "async_task_spawned",
+            "asyncTaskId": "task-1",
+            "name": "npm run dev",
+            "taskType": "shell",
+            "showInTranscript": true,
+            "canStop": true,
+            "toolCallId": "call-1",
+        });
+
+        assert!(publish_async_task_update(
+            &active_id,
+            &updates,
+            &session_update("agent-session", spawned.clone())
+        ));
+        assert_eq!(rx.try_recv().unwrap(), spawned);
+
+        let foreign = serde_json::json!({
+            "sessionUpdate": "async_task_state_update",
+            "asyncTaskId": "task-2",
+            "state": "stopped",
+        });
+        assert!(publish_async_task_update(
+            &active_id,
+            &updates,
+            &session_update("replaced-session", foreign)
+        ));
+        assert!(rx.try_recv().is_err());
+
+        let chunk = serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "hi" },
+        });
+        assert!(!publish_async_task_update(
+            &active_id,
+            &updates,
+            &session_update("agent-session", chunk)
+        ));
+        let other = UntypedMessage::new(AUTH_STATUS_UPDATE_METHOD, serde_json::json!({})).unwrap();
+        assert!(!publish_async_task_update(&active_id, &updates, &other));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// End to end against a scripted agent: the capability goes out in
+    /// `initialize`, a task update of the active session reaches subscribers
+    /// while every other update still reaches the typed receiver, and a stop
+    /// goes to the agent with its own session id and returns its response.
+    #[tokio::test]
+    async fn agent_async_tasks_are_advertised_forwarded_and_stopped() {
+        use agent_client_protocol::{ByteStreams, Responder};
+
+        let (client_read, agent_write) = tokio::io::duplex(64 * 1024);
+        let (agent_read, client_write) = tokio::io::duplex(64 * 1024);
+        let advertised: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let stop_params: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let recorded_advertised = advertised.clone();
+        let recorded_stop = stop_params.clone();
+
+        let agent = tokio::spawn(async move {
+            Agent
+                .builder()
+                .name("async-task-agent")
+                .on_receive_request(
+                    async move |req: InitializeRequest, responder, _cx| {
+                        *recorded_advertised.lock().unwrap() =
+                            serde_json::to_value(&req.client_capabilities.meta).ok();
+                        responder.respond(InitializeResponse::new(ProtocolVersion::LATEST))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async |_req: NewSessionRequest, responder, _cx| {
+                        responder.respond(NewSessionResponse::new(SessionId::new("agent-session")))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |req: UntypedMessage,
+                                responder: Responder<serde_json::Value>,
+                                cx: ConnectionTo<Client>| {
+                        if req.method() != ASYNC_TASK_STOP_METHOD {
+                            return responder.respond_with_error(
+                                agent_client_protocol::Error::method_not_found(),
+                            );
+                        }
+                        *recorded_stop.lock().unwrap() = Some(req.params().clone());
+                        let task_id = req.params()["asyncTaskId"].clone();
+                        cx.send_notification(session_update(
+                            "replaced-session",
+                            serde_json::json!({
+                                "sessionUpdate": "async_task_state_update",
+                                "asyncTaskId": "foreign-task",
+                                "state": "stopped",
+                            }),
+                        ))?;
+                        cx.send_notification(session_update(
+                            "agent-session",
+                            serde_json::json!({
+                                "sessionUpdate": "async_task_state_update",
+                                "asyncTaskId": task_id,
+                                "state": "stopped",
+                                "toolCallId": "call-1",
+                            }),
+                        ))?;
+                        cx.send_notification(SessionNotification::new(
+                            SessionId::new("agent-session"),
+                            SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                ContentBlock::Text(TextContent::new("still typed")),
+                            )),
+                        ))?;
+                        responder.respond(serde_json::json!({ "stopped": true }))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .connect_to(ByteStreams::new(
+                    agent_write.compat_write(),
+                    agent_read.compat(),
+                ))
+                .await
+        });
+
+        let (typed_tx, mut typed_rx) = mpsc::unbounded_channel::<SessionNotification>();
+        let config = AcpProviderConfig {
+            command: "unused".into(),
+            args: vec![],
+            env: vec![],
+            env_remove: vec![],
+            work_dir: std::env::temp_dir(),
+            mcp_servers: vec![],
+            session_mode_id: None,
+            session_config_options: vec![],
+            model_config_option_id: None,
+            mode_mapping: HashMap::new(),
+            notification_callback: Some(Arc::new(move |notification| {
+                let _ = typed_tx.send(notification);
+            })),
+        };
+        let provider = AcpProvider::connect_with_transport(
+            "async-task-acp".to_string(),
+            GooseMode::default(),
+            config,
+            ByteStreams::new(client_write.compat_write(), client_read.compat()),
+        )
+        .await
+        .expect("provider connects to the scripted agent");
+
+        assert_eq!(
+            *advertised.lock().unwrap(),
+            Some(serde_json::json!({
+                "jetbrains": { "air": { "version": 1, "capabilities": ["asyncTasks"] } }
+            }))
+        );
+
+        let mut tasks = provider
+            .subscribe_async_tasks()
+            .expect("async task updates");
+        let response = provider.stop_async_task("task-7").await.unwrap();
+        assert_eq!(response, serde_json::json!({ "stopped": true }));
+        assert_eq!(
+            *stop_params.lock().unwrap(),
+            Some(serde_json::json!({ "sessionId": "agent-session", "asyncTaskId": "task-7" }))
+        );
+
+        let wait = std::time::Duration::from_secs(2);
+        let forwarded = tokio::time::timeout(wait, tasks.recv())
+            .await
+            .expect("timed out waiting for the task update")
+            .unwrap();
+        assert_eq!(
+            forwarded,
+            serde_json::json!({
+                "sessionUpdate": "async_task_state_update",
+                "asyncTaskId": "task-7",
+                "state": "stopped",
+                "toolCallId": "call-1",
+            })
+        );
+        let typed = tokio::time::timeout(wait, typed_rx.recv())
+            .await
+            .expect("timed out waiting for the typed update")
+            .unwrap();
+        assert!(matches!(typed.update, SessionUpdate::AgentMessageChunk(_)));
+        assert!(tasks.try_recv().is_err());
+
+        drop(provider);
+        agent.abort();
+    }
+
     #[test]
     fn prompt_internal_error_remains_request_failed() {
         let error = provider_error_from_acp(agent_client_protocol::Error::internal_error());
@@ -2671,6 +2995,7 @@ mod tests {
                 model_config_option_id: None,
                 applied_model: Arc::new(Mutex::new(None)),
                 effort: AcpEffortState::new(),
+                async_tasks: AcpAsyncTasks::new(),
                 tx,
                 cancel_tx: None,
                 loop_thread: None,

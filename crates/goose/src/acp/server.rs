@@ -106,6 +106,7 @@ mod agent_mentions;
 pub use crate::execution::ActiveRunRegistry;
 use crate::execution::StartRunError;
 mod apps;
+mod async_tasks;
 mod config;
 mod custom_dispatch;
 mod diagnostics;
@@ -330,9 +331,14 @@ pub struct GooseAcpAgent {
     client_supports_goose_custom_notifications: OnceCell<bool>,
     client_supports_recipe_param_requests: OnceCell<bool>,
     client_requests_tool_call_label_enrichment: OnceCell<bool>,
+    client_supports_async_tasks: OnceCell<bool>,
     client_cx: OnceCell<ConnectionTo<Client>>,
     thinking_effort_update_tx: mpsc::UnboundedSender<String>,
     thinking_effort_update_rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
+    async_task_update_tx: mpsc::UnboundedSender<async_tasks::AsyncTaskUpdate>,
+    async_task_update_rx: Mutex<Option<mpsc::UnboundedReceiver<async_tasks::AsyncTaskUpdate>>>,
+    /// The provider each session's background tasks are subscribed from.
+    async_task_subscriptions: std::sync::Mutex<HashMap<String, std::sync::Weak<dyn Provider>>>,
     background_subagent_tx: mpsc::UnboundedSender<BackgroundSubagentEnvelope>,
     background_subagent_rx: Mutex<Option<mpsc::UnboundedReceiver<BackgroundSubagentEnvelope>>>,
     config_dir: std::path::PathBuf,
@@ -985,6 +991,7 @@ impl GooseAcpAgent {
         let agent_manager = Arc::new(AgentManager::new(agent_config, None).await?);
         let (thinking_effort_update_tx, thinking_effort_update_rx) = mpsc::unbounded_channel();
         let (background_subagent_tx, background_subagent_rx) = mpsc::unbounded_channel();
+        let (async_task_update_tx, async_task_update_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -999,9 +1006,13 @@ impl GooseAcpAgent {
             client_supports_goose_custom_notifications: OnceCell::new(),
             client_supports_recipe_param_requests: OnceCell::new(),
             client_requests_tool_call_label_enrichment: OnceCell::new(),
+            client_supports_async_tasks: OnceCell::new(),
             client_cx: OnceCell::new(),
             thinking_effort_update_tx,
             thinking_effort_update_rx: Mutex::new(Some(thinking_effort_update_rx)),
+            async_task_update_tx,
+            async_task_update_rx: Mutex::new(Some(async_task_update_rx)),
+            async_task_subscriptions: std::sync::Mutex::new(HashMap::new()),
             background_subagent_tx,
             background_subagent_rx: Mutex::new(Some(background_subagent_rx)),
             config_dir: options.config_dir,
@@ -1194,6 +1205,7 @@ impl GooseAcpAgent {
             .insert(session_id.clone(), acp_session);
         self.subscribe_thinking_effort_updates(&session_id, &agent)
             .await;
+        self.subscribe_async_tasks(&session_id, &agent).await;
         self.subscribe_background_subagents(&agent);
     }
 
@@ -1997,6 +2009,9 @@ impl GooseAcpAgent {
         let _ = self
             .client_supports_acp_elicitation
             .set(elicitation::client_supports_form_elicitation(&args));
+        let _ = self
+            .client_supports_async_tasks
+            .set(async_tasks::client_supports_async_tasks(&args));
 
         let capabilities = AgentCapabilities::new()
             .load_session(true)
@@ -2906,6 +2921,7 @@ impl GooseAcpAgent {
             .internal_err_ctx("Failed to switch provider")?;
         self.subscribe_thinking_effort_updates(session_id, &agent)
             .await;
+        self.subscribe_async_tasks(session_id, &agent).await;
         Ok(())
     }
 

@@ -24,6 +24,7 @@ impl HandleDispatchFrom<Client> for GooseAcpHandler {
             let _ = agent.client_cx.set(cx.clone());
             agent.start_thinking_effort_update_forwarder(&cx).await;
             agent.start_background_subagent_forwarder(&cx).await;
+            agent.start_async_task_forwarder(&cx).await;
 
             // InitializeRequest runs inline: it sets connection-scoped state
             // that later handlers read with defaults, so a pipelined
