@@ -10,7 +10,7 @@ use agent_client_protocol::schema::v1::{
     TextContent, ToolCallContent, ToolCallStatus, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::{Agent, Client, ConnectionTo};
+use agent_client_protocol::{Agent, Client, ConnectionTo, Handled, UntypedMessage};
 use agent_client_protocol_schema::v1::Usage as AcpUsage;
 use agent_client_protocol_schema::v1::AGENT_METHOD_NAMES;
 use anyhow::{Context, Result};
@@ -276,6 +276,47 @@ impl AcpSessionState {
 /// `usage_update` under this `_meta` key (acp-agent.js `rate_limit_event`).
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
+/// Agents advertising `agentCapabilities._meta.authStatus` (claude-agent-acp
+/// `auth-status.ts`, codex-acp `AuthStatusMeta.ts`) push the identity they
+/// bill through as this notification, `{ authStatus: { kind, label, … } }`,
+/// after `initialize` and whenever it changes. It is connection-scoped, never
+/// per session.
+const AUTH_STATUS_UPDATE_METHOD: &str = "_auth/status_update";
+
+/// Latest `authStatus` each agent reported in this process, by provider id.
+/// Kept beyond the connection that carried it, so `providers/list` can tell
+/// clients whether an agent runs on a subscription or bills per token.
+static REPORTED_AUTH_STATUS: std::sync::LazyLock<Mutex<HashMap<String, serde_json::Value>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Stores the `authStatus` of an `_auth/status_update` from `provider_name`.
+/// Returns false for any other notification, which stays unhandled.
+fn record_auth_status_update(provider_name: &str, notification: &UntypedMessage) -> bool {
+    if notification.method() != AUTH_STATUS_UPDATE_METHOD {
+        return false;
+    }
+    match notification.params().get("authStatus") {
+        Some(status) if status.is_object() => {
+            if let Ok(mut reported) = REPORTED_AUTH_STATUS.lock() {
+                reported.insert(provider_name.to_string(), status.clone());
+            }
+        }
+        _ => tracing::debug!(
+            provider = provider_name,
+            "auth status update without authStatus"
+        ),
+    }
+    true
+}
+
+/// The latest `authStatus` the agent behind `provider_id` reported, if any.
+pub(crate) fn reported_auth_status(provider_id: &str) -> Option<serde_json::Value> {
+    REPORTED_AUTH_STATUS
+        .lock()
+        .ok()
+        .and_then(|reported| reported.get(provider_id).cloned())
+}
+
 pub struct AcpProvider {
     name: String,
     goose_mode: Arc<Mutex<GooseMode>>,
@@ -412,15 +453,17 @@ impl AcpProvider {
         let context_used = Arc::new(AtomicU64::new(0));
         let rate_limit = Arc::new(Mutex::new(None));
         let effort = AcpEffortState::new();
-        let client_loop = AcpClientLoop::new(
+        let client_loop = AcpClientLoop {
+            provider_name: name.clone(),
             config,
-            goose_mode_shared.clone(),
-            pending_tool_updates.clone(),
-            context_size.clone(),
-            context_used.clone(),
-            rate_limit.clone(),
-            effort.clone(),
-        );
+            goose_mode: goose_mode_shared.clone(),
+            prompt_response_tx: Arc::new(Mutex::new(None)),
+            pending_tool_updates: pending_tool_updates.clone(),
+            context_size: context_size.clone(),
+            context_used: context_used.clone(),
+            rate_limit: rate_limit.clone(),
+            effort: effort.clone(),
+        };
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let loop_thread = spawn_client_loop(run(client_loop, rx, init_tx, cancel_rx));
         let mut client_loop_guard = ClientLoopGuard {
@@ -1173,6 +1216,9 @@ impl Drop for AcpProvider {
 }
 
 struct AcpClientLoop {
+    /// Goose provider id of this agent (e.g. `codex-acp`), the key under which
+    /// its `_auth/status_update` reports are kept.
+    provider_name: String,
     config: AcpProviderConfig,
     goose_mode: Arc<Mutex<GooseMode>>,
     prompt_response_tx: Arc<Mutex<Option<mpsc::Sender<AcpUpdate>>>>,
@@ -1184,27 +1230,6 @@ struct AcpClientLoop {
 }
 
 impl AcpClientLoop {
-    fn new(
-        config: AcpProviderConfig,
-        goose_mode: Arc<Mutex<GooseMode>>,
-        pending_tool_updates: Arc<Mutex<HashMap<String, AccumulatedToolCall>>>,
-        context_size: Arc<AtomicU64>,
-        context_used: Arc<AtomicU64>,
-        rate_limit: Arc<Mutex<Option<serde_json::Value>>>,
-        effort: AcpEffortState,
-    ) -> Self {
-        Self {
-            config,
-            goose_mode,
-            prompt_response_tx: Arc::new(Mutex::new(None)),
-            pending_tool_updates,
-            context_size,
-            context_used,
-            rate_limit,
-            effort,
-        }
-    }
-
     async fn spawn(
         self,
         mut rx: mpsc::Receiver<ClientRequest>,
@@ -1251,6 +1276,7 @@ impl AcpClientLoop {
         init_tx: oneshot::Sender<Result<InitializeResponse>>,
     ) -> Result<()> {
         let AcpClientLoop {
+            provider_name,
             config,
             goose_mode,
             prompt_response_tx,
@@ -1454,6 +1480,18 @@ impl AcpClientLoop {
                         }
                         Ok(())
                     }
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_notification(
+                async move |notification: UntypedMessage, cx| {
+                    if record_auth_status_update(&provider_name, &notification) {
+                        return Ok(Handled::Yes);
+                    }
+                    Ok(Handled::No {
+                        message: (notification, cx),
+                        retry: false,
+                    })
                 },
                 agent_client_protocol::on_receive_notification!(),
             )
@@ -2574,6 +2612,31 @@ mod tests {
         let error = provider_error_from_acp(agent_client_protocol::Error::auth_required());
 
         assert!(matches!(error, ProviderError::Authentication(_)));
+    }
+
+    #[test]
+    fn auth_status_update_is_kept_per_agent() {
+        let account = serde_json::json!({ "kind": "account", "label": "ChatGPT Plus" });
+        let update = UntypedMessage::new(
+            AUTH_STATUS_UPDATE_METHOD,
+            serde_json::json!({ "authStatus": account }),
+        )
+        .unwrap();
+        assert!(record_auth_status_update("test-auth-agent", &update));
+        assert_eq!(reported_auth_status("test-auth-agent"), Some(account));
+        assert_eq!(reported_auth_status("test-auth-other"), None);
+
+        let api_key = serde_json::json!({ "kind": "api_key", "label": "OpenAI API key" });
+        let switched = UntypedMessage::new(
+            AUTH_STATUS_UPDATE_METHOD,
+            serde_json::json!({ "authStatus": api_key }),
+        )
+        .unwrap();
+        assert!(record_auth_status_update("test-auth-agent", &switched));
+        assert_eq!(reported_auth_status("test-auth-agent"), Some(api_key));
+
+        let other = UntypedMessage::new("_other/notice", serde_json::json!({})).unwrap();
+        assert!(!record_auth_status_update("test-auth-agent", &other));
     }
 
     #[test]

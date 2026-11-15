@@ -96,6 +96,7 @@ fn provider_secret_to_dto(secret: provider_secrets::ProviderSecret) -> ProviderS
 
 fn inventory_entry_to_dto(entry: ProviderInventoryEntry) -> ProviderInventoryEntryDto {
     let stale = ProviderInventoryService::is_stale(&entry);
+    let auth_status = crate::acp::provider::reported_auth_status(&entry.provider_id);
     ProviderInventoryEntryDto {
         provider_id: entry.provider_id,
         provider_name: entry.provider_name,
@@ -132,6 +133,7 @@ fn inventory_entry_to_dto(entry: ProviderInventoryEntry) -> ProviderInventoryEnt
         last_refresh_attempt_at: entry.last_refresh_attempt_at.map(|t| t.to_rfc3339()),
         last_refresh_error: entry.last_refresh_error,
         stale,
+        auth_status,
     }
 }
 

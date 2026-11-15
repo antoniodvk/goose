@@ -1874,6 +1874,9 @@
         "stale": {
           "type": "boolean",
           "description": "Whether we believe this data may be outdated."
+        },
+        "authStatus": {
+          "description": "The identity an ACP agent reports it bills through, verbatim from its\nlatest `_auth/status_update` (`authStatus`: `kind` is `account`,\n`api_key`, `gateway`, `external` or `none`, plus `label`). Absent until\nthe agent has reported in this goose process, and for other providers."
         }
       },
       "required": [

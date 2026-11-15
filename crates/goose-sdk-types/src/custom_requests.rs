@@ -1969,6 +1969,12 @@ pub struct ProviderInventoryEntryDto {
     pub last_refresh_error: Option<String>,
     /// Whether we believe this data may be outdated.
     pub stale: bool,
+    /// The identity an ACP agent reports it bills through, verbatim from its
+    /// latest `_auth/status_update` (`authStatus`: `kind` is `account`,
+    /// `api_key`, `gateway`, `external` or `none`, plus `label`). Absent until
+    /// the agent has reported in this goose process, and for other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_status: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
