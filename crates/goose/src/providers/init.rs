@@ -8,6 +8,7 @@ use super::local_inference::LocalInferenceProvider;
 use super::sagemaker_tgi::SageMakerTgiProvider;
 use super::{
     amp_acp::AmpAcpProvider,
+    antigravity_acp::AntigravityAcpProvider,
     avian::AvianProvider,
     azure::AzureProvider,
     base::{Provider, ProviderMetadata},
@@ -65,6 +66,7 @@ async fn init_registry() -> RwLock<ProviderRegistry> {
             false,
             Some(registrations::amp_acp_inventory()),
         );
+        registry.register::<AntigravityAcpProvider>(false);
         registry.register_with_inventory::<AnthropicProviderDef>(
             true,
             Some(registrations::anthropic_inventory()),
