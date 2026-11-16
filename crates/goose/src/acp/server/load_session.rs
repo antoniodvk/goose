@@ -416,6 +416,16 @@ impl GooseAcpAgent {
         let cwd = effective_session_cwd(self.session_cwd.as_deref(), &args.cwd);
         validate_absolute_cwd(&cwd)?;
 
+        if let Some(enabled) = meta_skills(args.meta.as_ref())? {
+            set_skills_state(&mut session.extension_data, enabled)?;
+            self.session_manager
+                .update(&session_id_str)
+                .extension_data(session.extension_data.clone())
+                .apply()
+                .await
+                .internal_err_ctx("Failed to store the skills switch")?;
+        }
+
         session = self
             .prepare_session_for_activation(session, cwd, args.mcp_servers, true)
             .await?;

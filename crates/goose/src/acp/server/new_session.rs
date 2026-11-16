@@ -164,13 +164,16 @@ impl GooseAcpAgent {
 
         let goose_extensions = meta_goose_extensions(args.meta.as_ref())?;
         let recipe_extensions = rendered.as_ref().and_then(|r| r.extensions.as_deref());
-        let extension_data = self.build_enabled_extensions_data(
+        let mut extension_data = self.build_enabled_extensions_data(
             config,
             session,
             args.mcp_servers,
             goose_extensions,
             recipe_extensions,
         )?;
+        if let Some(enabled) = super::meta_skills(args.meta.as_ref())? {
+            super::set_skills_state(&mut extension_data, enabled)?;
+        }
 
         self.apply_initial_session_config(
             &session.id,
@@ -318,6 +321,22 @@ mod tests {
             serde_json::Value::Object(map) => map,
             other => panic!("expected object, got {other}"),
         }
+    }
+
+    #[test]
+    fn skills_meta_is_optional_boolean() {
+        use crate::session::{ExtensionData, ExtensionState, SkillsState};
+        assert_eq!(super::super::meta_skills(None).unwrap(), None);
+        let off = meta(json!({ "skills": false }));
+        assert_eq!(super::super::meta_skills(Some(&off)).unwrap(), Some(false));
+        let bad = meta(json!({ "skills": "no" }));
+        assert!(super::super::meta_skills(Some(&bad)).is_err());
+        let mut data = ExtensionData::new();
+        super::super::set_skills_state(&mut data, false).unwrap();
+        assert_eq!(
+            SkillsState::from_extension_data(&data),
+            Some(SkillsState { enabled: false })
+        );
     }
 
     #[test]

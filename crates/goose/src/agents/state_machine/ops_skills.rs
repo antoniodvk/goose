@@ -61,8 +61,10 @@ fn skill_tool() -> Result<Tool> {
 
 /// Set `GOOSE_NO_SKILL_LIST` to leave skills out of the system prompt and the tool list
 /// (saves the skill-list input tokens on every turn for runs that do not use skills).
-fn skills_disabled() -> bool {
+/// A session started with `_meta.skills: false` gets no skills either (A75: anonymous chats).
+fn skills_disabled(session: &Session) -> bool {
     std::env::var_os("GOOSE_NO_SKILL_LIST").is_some_and(|value| !value.is_empty())
+        || !crate::session::SkillsState::enabled_for(session)
 }
 
 /// Skill listing rules of Claude Code (C152), switched on by `GOOSE_SKILL_LISTING` (JSON), which the
@@ -197,7 +199,7 @@ fn listing_lines(
 }
 
 fn skill_instructions(session: &Session) -> Option<String> {
-    if skills_disabled() {
+    if skills_disabled(session) {
         return None;
     }
     let sources = crate::skills::discover_skills(Some(&session.working_dir));
@@ -427,6 +429,9 @@ impl Operation<Session, GooseEffect> for SkillOperation {
         conversation: &Conversation,
         emit: &Emitter,
     ) -> Result<OperationResult<GooseEffect>> {
+        if skills_disabled(session) {
+            return not_applicable();
+        }
         if command.command == "skills" {
             return Self::command_response(
                 conversation,
@@ -467,8 +472,8 @@ impl Operation<Session, GooseEffect> for SkillOperation {
         ])
     }
 
-    async fn inference_tools(&self, _session: &Session) -> Result<Vec<Tool>> {
-        if skills_disabled() {
+    async fn inference_tools(&self, session: &Session) -> Result<Vec<Tool>> {
+        if skills_disabled(session) {
             return Ok(Vec::new());
         }
         Ok(vec![skill_tool()?])

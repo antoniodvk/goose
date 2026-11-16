@@ -369,6 +369,31 @@ fn meta_string(
     Ok(Some(value.to_string()))
 }
 
+/// `_meta.skills` (boolean) of `session/new` and `session/load`: whether the session sees skills.
+/// `None` when absent, so a loaded session keeps what it had.
+fn meta_skills(meta: Option<&Meta>) -> Result<Option<bool>, agent_client_protocol::Error> {
+    let Some(value) = meta.and_then(|m| m.get("skills")) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value.as_bool().map(Some).ok_or_else(|| {
+        agent_client_protocol::Error::invalid_params().data("skills must be a boolean")
+    })
+}
+
+/// Writes the skills switch into the session's extension data (A75).
+fn set_skills_state(
+    extension_data: &mut crate::session::ExtensionData,
+    enabled: bool,
+) -> Result<(), agent_client_protocol::Error> {
+    use crate::session::{ExtensionState, SkillsState};
+    SkillsState { enabled }
+        .to_extension_data(extension_data)
+        .map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))
+}
+
 fn agent_capabilities_meta() -> Option<Meta> {
     let mut goose = serde_json::Map::new();
     goose.insert("recipeParameterScopes".to_string(), serde_json::json!({}));

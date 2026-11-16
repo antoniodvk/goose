@@ -160,6 +160,24 @@ impl GoalState {
     }
 }
 
+/// Whether the session sees skills (skill list in the system prompt, `load_skill`, skill slash commands).
+/// Set from `_meta.skills` on `session/new` or `session/load`; missing means on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillsState {
+    pub enabled: bool,
+}
+
+impl ExtensionState for SkillsState {
+    const EXTENSION_NAME: &'static str = "skills";
+    const VERSION: &'static str = "v0";
+}
+
+impl SkillsState {
+    pub fn enabled_for(session: &Session) -> bool {
+        Self::from_extension_data(&session.extension_data).is_none_or(|state| state.enabled)
+    }
+}
+
 /// Enabled extensions state implementation for storing which extensions are active
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnabledExtensionsState {
