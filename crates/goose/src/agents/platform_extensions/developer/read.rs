@@ -11,9 +11,9 @@ use super::encoding::Bom;
 
 /// Lines returned when the caller gives no limit (same default as Claude Code's Read).
 const DEFAULT_LINE_LIMIT: usize = 2000;
-/// Characters kept per line; the rest is cut and marked.
-const MAX_LINE_CHARS: usize = 2000;
-/// Upper bound of one read result (about 25k tokens, like Claude Code's output cap).
+/// Upper bound of one read result (about 25k tokens, like Claude Code's output cap). Lines come
+/// back whole like in Claude Code's Read; only a single line beyond this bound is cut and marked
+/// (N1011: a cut at 2000 characters hid the rest of long documentation lines from the model).
 pub const READ_OUTPUT_LIMIT_BYTES: usize = 100_000;
 const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_PDF_PAGES_PER_REQUEST: usize = 20;
@@ -204,11 +204,11 @@ fn cut_to_bytes(text: &str, max: usize) -> String {
 }
 
 fn truncate_line(line: &str) -> String {
-    let count = line.chars().count();
-    if count <= MAX_LINE_CHARS {
+    if line.len() <= READ_OUTPUT_LIMIT_BYTES {
         return line.to_string();
     }
-    let kept: String = line.chars().take(MAX_LINE_CHARS).collect();
+    let kept = cut_to_bytes(line, READ_OUTPUT_LIMIT_BYTES);
+    let count = line.chars().count();
     format!("{kept}... [line cut: {count} characters]")
 }
 
@@ -537,11 +537,22 @@ mod tests {
     }
 
     #[test]
-    fn long_lines_are_cut_and_marked() {
+    fn long_lines_come_back_whole_up_to_the_output_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let content = "z".repeat(3000);
+        let content = format!("{}\nend", "z".repeat(9000));
         let result = read(&dir, "line.txt", content.as_bytes(), None, None);
-        assert!(text_of(&result).contains("... [line cut: 3000 characters]"));
+        let text = text_of(&result);
+        assert!(text.contains(&"z".repeat(9000)));
+        assert!(!text.contains("line cut"));
+        assert!(text.ends_with("     2\tend"));
+
+        let huge = "ä".repeat(READ_OUTPUT_LIMIT_BYTES);
+        let result = read(&dir, "huge.txt", huge.as_bytes(), None, None);
+        let text = text_of(&result);
+        assert!(text.len() < READ_OUTPUT_LIMIT_BYTES + 200);
+        assert!(text.contains(&format!(
+            "... [line cut: {READ_OUTPUT_LIMIT_BYTES} characters]"
+        )));
     }
 
     #[test]

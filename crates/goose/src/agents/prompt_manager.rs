@@ -433,7 +433,24 @@ mod tests {
         builder.base_template = "openai_system.md";
         let prompt = builder.build().unwrap();
 
-        assert!(prompt.starts_with("You are goose, an agent based on an OpenAI GPT model"));
+        assert!(
+            prompt.starts_with("You are goose, an agent based on an OpenAI GPT model, created by")
+        );
+        builder = manager.builder();
+        builder.base_template = "openai_system.md";
+        builder.model_family = Some("openai");
+        assert!(builder
+            .build()
+            .unwrap()
+            .starts_with("You are goose, an agent based on an OpenAI GPT model, created by"));
+        // Chosen for another family (GOOSE_BASE_PROMPT_OTHER = openai), the text must not call
+        // a Gemini or DeepSeek model a GPT model (N1012).
+        builder = manager.builder();
+        builder.base_template = "openai_system.md";
+        builder.model_family = Some("other");
+        let other = builder.build().unwrap();
+        assert!(other.starts_with("You are goose, an agent created by AAIF"));
+        assert!(!other.contains("OpenAI GPT model"));
         assert!(prompt.contains("# Autonomy and persistence"));
         assert!(prompt.contains("# Turn Context"));
         assert!(prompt.contains("`load_skill`"));
