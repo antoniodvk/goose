@@ -1,5 +1,6 @@
 use crate::conversation::message::{
-    Message, MessageContentBlock, ProviderMetadata, ToolRequest, RESPONSES_REPLAY_KEY,
+    Message, MessageContentBlock, ProviderMetadata, ThinkingContentBlock, ToolRequest,
+    RESPONSES_REPLAY_KEY,
 };
 use crate::conversation::token_usage::{ProviderUsage, Usage};
 use crate::documents::{
@@ -7,6 +8,7 @@ use crate::documents::{
     ASSISTANT_ROLE_REASON, UNSUPPORTED_MEDIA_TYPE_REASON,
 };
 use crate::errors::ProviderError;
+use crate::formats::anthropic::thinking_block_is_stale;
 use crate::formats::openai::{
     extract_reasoning_effort, openai_reasoning_effort_for_thinking, sanitize_function_name,
 };
@@ -46,16 +48,59 @@ pub struct SummaryText {
     pub text: String,
 }
 
-fn reasoning_from_summary(summary: &[SummaryText]) -> Option<MessageContentBlock> {
+fn reasoning_from_output(
+    summary: &[SummaryText],
+    encrypted_content: Option<&str>,
+) -> Option<MessageContentBlock> {
     let text: String = summary
         .iter()
         .map(|s| sanitize_unicode_tags(&s.text))
         .collect::<Vec<_>>()
         .join("\n");
-    if text.is_empty() {
+    let encrypted_content = encrypted_content.unwrap_or_default();
+    if text.is_empty() && encrypted_content.is_empty() {
         None
     } else {
-        Some(MessageContentBlock::thinking(text, ""))
+        Some(MessageContentBlock::thinking(text, encrypted_content))
+    }
+}
+
+/// The thinking signature slot also carries Anthropic signatures and reasoning
+/// imported from other accounts, which the API rejects, so only reasoning that
+/// `current_model` produced in this session is replayed.
+pub fn reasoning_input_item(
+    message: &Message,
+    thinking: &ThinkingContentBlock,
+    current_model: &str,
+) -> Option<Value> {
+    if thinking.signature.is_empty()
+        || message.metadata.inference.is_none()
+        || thinking_block_is_stale(message, Some(current_model))
+    {
+        return None;
+    }
+    let summary: Vec<Value> = if thinking.thinking.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({ "type": "summary_text", "text": thinking.thinking })]
+    };
+    Some(json!({
+        "type": "reasoning",
+        "summary": summary,
+        "encrypted_content": thinking.signature
+    }))
+}
+
+pub fn is_encrypted_reasoning_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("encrypted content") && lower.contains("could not be verified")
+}
+
+/// Rejected reasoning stays in the session, so callers retry once without any
+/// reasoning items rather than failing every later request.
+pub fn strip_reasoning_items(payload: &mut Value) {
+    if let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) {
+        input.retain(|item| item["type"] != "reasoning");
     }
 }
 
@@ -452,7 +497,7 @@ fn add_message_items(
     input_items: &mut Vec<Value>,
     messages: &[Message],
     supports_vision: bool,
-    model_name: &str,
+    current_model: &str,
 ) {
     for message in messages.iter().filter(|m| m.is_agent_visible()) {
         let role = match message.role {
@@ -461,6 +506,7 @@ fn add_message_items(
         };
 
         let mut text_items = Vec::new();
+        let mut emitted_thinking_reasoning = false;
 
         for content in &message.content {
             match content {
@@ -479,15 +525,25 @@ fn add_message_items(
                         }));
                     }
                 }
+                // Streamed text is stored ahead of the reasoning that produced it,
+                // so pending text is left to flush after the reasoning item.
+                MessageContentBlock::Thinking(thinking) if message.role == Role::Assistant => {
+                    if let Some(item) = reasoning_input_item(message, thinking, current_model) {
+                        input_items.push(item);
+                        emitted_thinking_reasoning = true;
+                    }
+                }
                 MessageContentBlock::ToolRequest(request) if message.role == Role::Assistant => {
                     // The model reasons first, then writes its preamble, then calls
                     // the tool; the preamble is still buffered in `text_items`.
-                    let replay = replay_for(request, model_name);
-                    if let Some(reasoning) = replay
-                        .and_then(|replay| replay.get("reasoning"))
-                        .and_then(Value::as_array)
-                    {
-                        input_items.extend(reasoning.iter().cloned());
+                    let replay = replay_for(request, current_model);
+                    if !emitted_thinking_reasoning {
+                        if let Some(reasoning) = replay
+                            .and_then(|replay| replay.get("reasoning"))
+                            .and_then(Value::as_array)
+                        {
+                            input_items.extend(reasoning.iter().cloned());
+                        }
                     }
                     if !text_items.is_empty() {
                         let mut item = json!({
@@ -782,6 +838,10 @@ pub fn create_responses_request_for_model(
             .insert("reasoning".to_string(), Value::Object(reasoning));
     }
 
+    if is_reasoning_model {
+        payload["include"] = json!(["reasoning.encrypted_content"]);
+    }
+
     if !tools.is_empty() {
         let tools_spec: Vec<Value> = tools
             .iter()
@@ -971,7 +1031,7 @@ pub fn responses_api_to_message(response: &ResponsesApiResponse) -> anyhow::Resu
                 encrypted_content,
                 ..
             } => {
-                content.extend(reasoning_from_summary(summary));
+                content.extend(reasoning_from_output(summary, encrypted_content.as_deref()));
                 pending_replay.add_reasoning(summary, encrypted_content.as_deref());
             }
             ResponseOutputItem::Message {
@@ -1112,7 +1172,10 @@ fn process_streaming_output_items(
                 encrypted_content,
                 ..
             } => {
-                content.extend(reasoning_from_summary(&summary));
+                content.extend(reasoning_from_output(
+                    &summary,
+                    encrypted_content.as_deref(),
+                ));
                 pending_replay.add_reasoning(&summary, encrypted_content.as_deref());
             }
             ResponseOutputItemInfo::Message {
@@ -1435,7 +1498,7 @@ mod document_tests {
 
     fn format(messages: &[Message]) -> Vec<Value> {
         let mut items = Vec::new();
-        add_message_items(&mut items, messages, true, "gpt-6.1-terra");
+        add_message_items(&mut items, messages, true, "gpt-5.6");
         items
     }
 
@@ -3796,5 +3859,58 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("invalid arguments"));
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_reasoning_replays_only_for_its_model() -> anyhow::Result<()> {
+        use crate::conversation::message::InferenceMetadata;
+        use rmcp::model::CallToolResult;
+
+        let reasoning_item = json!({
+            "type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc-1"
+        });
+        let call_item = json!({
+            "type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "shell", "arguments": "{}"
+        });
+        let lines = vec![format!(
+            r#"data: {{"type":"response.completed","sequence_number":1,"response":{{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.6","output":[{reasoning_item},{call_item}]}}}}"#
+        )];
+        let stream =
+            responses_api_to_streaming_message(tokio_stream::iter(lines.into_iter().map(Ok)));
+        futures::pin_mut!(stream);
+        let (Some(assistant), _) = stream.next().await.unwrap()? else {
+            panic!("expected a message");
+        };
+        let assistant = assistant.with_inference(InferenceMetadata {
+            provider: "openai".to_string(),
+            requested_model: "gpt-5.6".to_string(),
+            resolved_model: None,
+            provider_session_id: None,
+        });
+        let messages = vec![
+            Message::user().with_text("list files"),
+            assistant,
+            Message::user().with_content(MessageContentBlock::tool_response(
+                "call_1",
+                Ok(CallToolResult::success(vec![ContentBlock::text("a.txt")])),
+            )),
+        ];
+
+        let same = create_responses_request(&ModelConfig::new("gpt-5.6"), "", &messages, &[])?;
+        assert_eq!(same["include"], json!(["reasoning.encrypted_content"]));
+        let input = same["input"].as_array().unwrap();
+        assert_eq!(
+            input[1],
+            json!({ "type": "reasoning", "summary": [], "encrypted_content": "enc-1" })
+        );
+        assert_eq!(input[2]["type"], "function_call");
+
+        let other = create_responses_request(&ModelConfig::new("gpt-5.5"), "", &messages, &[])?;
+        assert!(!other["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "reasoning"));
+        Ok(())
     }
 }

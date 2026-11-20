@@ -37,7 +37,8 @@ impl EditTools {
         Self
     }
 
-    pub fn file_write(&self, params: FileWriteParams) -> CallToolResult {
+    #[cfg(test)]
+    fn file_write(&self, params: FileWriteParams) -> CallToolResult {
         self.file_write_with_cwd(params, None)
     }
 
@@ -84,7 +85,8 @@ impl EditTools {
         }
     }
 
-    pub fn file_edit(&self, params: FileEditParams) -> CallToolResult {
+    #[cfg(test)]
+    fn file_edit(&self, params: FileEditParams) -> CallToolResult {
         self.file_edit_with_cwd(params, None)
     }
 
@@ -230,7 +232,7 @@ pub fn string_replace(
     }
 }
 
-pub fn resolve_path(path: &str, working_dir: Option<&Path>) -> PathBuf {
+pub(super) fn resolve_path(path: &str, working_dir: Option<&Path>) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
         path

@@ -19,7 +19,8 @@ use futures::future::BoxFuture;
 use futures::{StreamExt, TryStreamExt};
 use goose_providers::errors::ProviderError;
 use goose_providers::formats::openai_responses::{
-    replay_for, responses_api_to_streaming_message, stamp_replay_model,
+    is_encrypted_reasoning_error, reasoning_input_item, replay_for,
+    responses_api_to_streaming_message, stamp_replay_model, strip_reasoning_items,
 };
 use goose_providers::model::ModelConfig;
 use goose_providers::request_log::{start_log, LoggerHandleExt};
@@ -214,6 +215,7 @@ fn build_input_items(messages: &[Message], model_name: &str) -> Result<Vec<Value
             }
         };
 
+        let mut emitted_thinking_reasoning = false;
         for content in &message.content {
             match content {
                 MessageContent::Text(text) => {
@@ -232,15 +234,23 @@ fn build_input_items(messages: &[Message], model_name: &str) -> Result<Vec<Value
                         "image_url": format!("data:{};base64,{}", img.mime_type, img.data),
                     }));
                 }
+                MessageContent::Thinking(thinking) if message.role == Role::Assistant => {
+                    if let Some(item) = reasoning_input_item(message, thinking, model_name) {
+                        items.push(item);
+                        emitted_thinking_reasoning = true;
+                    }
+                }
                 MessageContent::ToolRequest(request) => {
                     // The model reasons first, then writes its preamble, then calls
                     // the tool; the preamble is still buffered in `content_items`.
                     let replay = replay_for(request, model_name);
-                    if let Some(reasoning) = replay
-                        .and_then(|replay| replay.get("reasoning"))
-                        .and_then(Value::as_array)
-                    {
-                        items.extend(reasoning.iter().cloned());
+                    if !emitted_thinking_reasoning {
+                        if let Some(reasoning) = replay
+                            .and_then(|replay| replay.get("reasoning"))
+                            .and_then(Value::as_array)
+                        {
+                            items.extend(reasoning.iter().cloned());
+                        }
                     }
                     let phase = replay.and_then(|replay| replay.get("phase"));
                     flush_text(&mut items, role, &mut content_items, phase);
@@ -353,6 +363,7 @@ fn create_codex_request(
         "store": false,
         "include": ["reasoning.encrypted_content"],
         "instructions": system,
+        "include": ["reasoning.encrypted_content"],
     });
 
     let payload_obj = payload
@@ -1228,15 +1239,31 @@ impl Provider for ChatGptCodexProvider {
         });
         let session_id = crate::session_context::current_session_id();
 
-        let response = self
-            .with_retry(|| async {
-                let payload_clone = payload.clone();
-                self.post_streaming(&payload_clone).await
-            })
+        let response = match self
+            .with_retry(|| async { self.post_streaming(&payload).await })
             .await
-            .inspect_err(|error| {
-                let _ = log.error(error);
-            })?;
+        {
+            Err(ProviderError::RequestFailed(message))
+                if is_encrypted_reasoning_error(&message) =>
+            {
+                tracing::warn!(
+                    error = %message,
+                    "API rejected replayed reasoning; retrying once without it"
+                );
+                let _ = log.error(&message);
+                strip_reasoning_items(&mut payload);
+                log = start_log(model_config, &payload).unwrap_or_else(|error| {
+                    tracing::warn!("Codex request not logged: {error}");
+                    None
+                });
+                self.with_retry(|| async { self.post_streaming(&payload).await })
+                    .await
+            }
+            other => other,
+        }
+        .inspect_err(|error| {
+            let _ = log.error(error);
+        })?;
 
         let stream = response.bytes_stream().map_err(io::Error::other);
         let model_name = model_config.model_name.clone();
@@ -1476,7 +1503,7 @@ mod tests {
         "image content included in user message"
     )]
     fn test_codex_input_order(messages: Vec<Message>, expected: Vec<String>) {
-        let items = build_input_items(&messages, "gpt-6.1-terra").unwrap();
+        let items = build_input_items(&messages, "gpt-5.6").unwrap();
         let payload = json!({ "input": items });
         let kinds = input_kinds(&payload);
         assert_eq!(kinds, expected);
@@ -1562,7 +1589,7 @@ mod tests {
     #[test]
     fn test_image_url_format() {
         let messages = vec![Message::user().with_image(TEST_IMAGE_B64, "image/png")];
-        let items = build_input_items(&messages, "gpt-6.1-terra").unwrap();
+        let items = build_input_items(&messages, "gpt-5.6").unwrap();
         // The image is inside the content array of the user message
         let content = items[0]["content"].as_array().unwrap();
         let image_item = &content[0];

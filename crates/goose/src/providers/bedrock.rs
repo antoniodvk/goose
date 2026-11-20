@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::base::{
     model_info_for_provider_model, ConfigKey, MessageStream, ModelInfo, Provider, ProviderDef,
@@ -169,6 +171,21 @@ fn find_model_entry(name: &str) -> Option<&'static BedrockModelEntry> {
     BEDROCK_MODEL_TABLE.iter().find(|e| e.name == candidate)
 }
 
+/// Model ID to send to Mantle, or `None` for Converse. Bedrock serves the
+/// closed-weight OpenAI GPT models by bare ID only on Mantle (Converse needs a
+/// `us.`/`global.` inference profile), so those route by ID shape without a
+/// table row. GPT OSS, inference profiles and ARNs stay on Converse.
+fn mantle_model_id(name: &str) -> Option<String> {
+    if let Some(entry) = find_model_entry(name) {
+        return (entry.endpoint == BedrockEndpoint::MantleResponses)
+            .then(|| entry.wire_model_id.to_string());
+    }
+    let (base, _) = extract_reasoning_effort(name.strip_prefix("openai.").unwrap_or(name));
+    base.strip_prefix("gpt-")?
+        .starts_with(|c: char| c.is_ascii_digit())
+        .then(|| format!("openai.{base}"))
+}
+
 pub const BEDROCK_DEFAULT_MAX_RETRIES: usize = 6;
 pub const BEDROCK_DEFAULT_INITIAL_RETRY_INTERVAL_MS: u64 = 2000;
 pub const BEDROCK_DEFAULT_BACKOFF_MULTIPLIER: f64 = 2.0;
@@ -190,6 +207,8 @@ pub struct BedrockProvider {
     http_client: reqwest::Client,
     #[serde(skip)]
     mantle_base_url: Option<String>,
+    #[serde(skip)]
+    documents_unsupported: AtomicBool,
 }
 
 /// Request inputs shared by the `Converse` and `ConverseStream` APIs.
@@ -309,6 +328,7 @@ impl BedrockProvider {
                 ))
                 .build()?,
             mantle_base_url: None,
+            documents_unsupported: AtomicBool::new(false),
         })
     }
 
@@ -447,8 +467,12 @@ impl BedrockProvider {
 
         let mut bedrock_messages: Vec<bedrock::Message> = Vec::new();
         for message in visible_messages {
-            let formatted =
-                to_bedrock_message_with_caching(message, false, Some(&model.model_name))?;
+            let formatted = to_bedrock_message_with_caching(
+                message,
+                false,
+                Some(&model.model_name),
+                self.documents_supported(),
+            )?;
             if formatted.content().is_empty() {
                 continue;
             }
@@ -485,6 +509,26 @@ impl BedrockProvider {
             thinking_fields: bedrock_anthropic_thinking_fields(model),
             inference_config: bedrock_inference_config(model),
         })
+    }
+
+    fn documents_supported(&self) -> bool {
+        !self.documents_unsupported.load(Ordering::Relaxed)
+    }
+
+    async fn send_with_document_fallback<T, Fut>(
+        &self,
+        request: impl Fn() -> Fut,
+    ) -> Result<T, ProviderError>
+    where
+        Fut: Future<Output = Result<T, ProviderError>>,
+    {
+        match request().await {
+            Err(err) if is_documents_unsupported_error(&err) => {
+                self.documents_unsupported.store(true, Ordering::Relaxed);
+                request().await
+            }
+            result => result,
+        }
     }
 
     async fn converse(
@@ -638,7 +682,11 @@ impl BedrockProvider {
         model_name: &str,
     ) -> Result<MessageStream, ProviderError> {
         let (bedrock_message, bedrock_usage) = self
-            .with_retry(|| self.converse(model, session_id, system, messages, tools))
+            .with_retry(|| {
+                self.send_with_document_fallback(|| {
+                    self.converse(model, session_id, system, messages, tools)
+                })
+            })
             .await?;
 
         let usage = bedrock_usage
@@ -933,27 +981,24 @@ impl ProviderDef for BedrockProvider {
     }
 }
 
-/// The table entry of a model served through the Mantle Responses endpoint.
-fn mantle_entry(model_name: &str) -> Option<&'static BedrockModelEntry> {
-    find_model_entry(model_name).filter(|entry| entry.endpoint == BedrockEndpoint::MantleResponses)
-}
-
 /// The Responses request `stream` sends to Mantle; the effort menu reads its
 /// levels off it.
 fn mantle_request_payload(
-    entry: &BedrockModelEntry,
+    wire_model_id: &str,
     model_config: &ModelConfig,
     system: &str,
     messages: &[Message],
     tools: &[Tool],
 ) -> Result<Value> {
-    let capability_model_name = entry.name.strip_prefix("openai.").unwrap_or(entry.name);
+    let capability_model_name = wire_model_id
+        .strip_prefix("openai.")
+        .unwrap_or(wire_model_id);
     let mut normalized_config = model_config.clone();
     normalized_config.model_name = capability_model_name.to_string();
     let mut payload = create_responses_request(&normalized_config, system, messages, tools)?;
-    payload["model"] = Value::String(entry.wire_model_id.to_string());
+    payload["model"] = Value::String(wire_model_id.to_string());
     payload["stream"] = Value::Bool(true);
-    if entry.name.starts_with("google.gemma-4-") {
+    if wire_model_id.starts_with("google.gemma-4-") {
         payload["parallel_tool_calls"] = Value::Bool(false);
     }
     Ok(payload)
@@ -971,10 +1016,10 @@ impl Provider for BedrockProvider {
     /// model offers none.
     fn declared_reasoning_efforts(&self, model_name: &str) -> Option<Vec<String>> {
         let model_config = ModelConfig::new(model_name).with_canonical_limits(&self.name);
-        if let Some(entry) = mantle_entry(model_name) {
+        if let Some(wire_model_id) = mantle_model_id(model_name) {
             return Some(goose_providers::formats::openai::reasoning_efforts_sent(
                 &model_config,
-                |config| mantle_request_payload(entry, config, "", &[], &[]).ok(),
+                |config| mantle_request_payload(&wire_model_id, config, "", &[], &[]).ok(),
             ));
         }
         Some(bedrock_thinking_levels_sent(&model_config).unwrap_or_default())
@@ -1021,8 +1066,9 @@ impl Provider for BedrockProvider {
             Some(session_id.as_str())
         };
 
-        if let Some(entry) = mantle_entry(&model_config.model_name) {
-            let payload = mantle_request_payload(entry, model_config, system, messages, tools)?;
+        if let Some(wire_model_id) = mantle_model_id(&model_config.model_name) {
+            let payload =
+                mantle_request_payload(&wire_model_id, model_config, system, messages, tools)?;
             let mut log = start_log(model_config, &payload).map_err(anyhow::Error::from)?;
 
             let response = self
@@ -1056,7 +1102,9 @@ impl Provider for BedrockProvider {
         // the Anthropic provider's behaviour).
         let response = self
             .with_retry(|| {
-                self.converse_stream(model_config, session_id_opt, system, messages, tools)
+                self.send_with_document_fallback(|| {
+                    self.converse_stream(model_config, session_id_opt, system, messages, tools)
+                })
             })
             .await?;
 
@@ -1172,6 +1220,13 @@ impl Provider for BedrockProvider {
     }
 }
 
+fn is_documents_unsupported_error(err: &ProviderError) -> bool {
+    matches!(
+        err,
+        ProviderError::ExecutionError(details) if details.contains("doesn't support documents")
+    )
+}
+
 fn map_converse_stream_error(err: ConverseStreamError) -> ProviderError {
     match err {
         ConverseStreamError::ThrottlingException(throttle_err) => {
@@ -1217,6 +1272,7 @@ mod tests {
 
         (
             BedrockProvider {
+                documents_unsupported: AtomicBool::new(false),
                 client,
                 retry_config: RetryConfig::default(),
                 name: "aws_bedrock".to_string(),
@@ -1238,6 +1294,23 @@ mod tests {
                 request_headers: None,
             },
         )
+    }
+
+    #[test]
+    fn documents_unsupported_error_is_detected() {
+        let err = ProviderError::ExecutionError(
+            "Bedrock validation error: ValidationException { message: Some(\"This model doesn't support documents.\") }"
+                .to_string(),
+        );
+        assert!(is_documents_unsupported_error(&err));
+
+        assert!(!is_documents_unsupported_error(&ProviderError::ExecutionError(
+            "Bedrock validation error: ValidationException { message: Some(\"Input is too long.\") }"
+                .to_string(),
+        )));
+        assert!(!is_documents_unsupported_error(
+            &ProviderError::ServerError("doesn't support documents".to_string(),)
+        ));
     }
 
     #[test]
@@ -1484,6 +1557,7 @@ mod tests {
 
         let model = ModelConfig::new("openai.gpt-5.5");
         let provider = BedrockProvider {
+            documents_unsupported: AtomicBool::new(false),
             client: Client::new(&sdk_config),
             retry_config: RetryConfig::default(),
             name: "aws_bedrock".to_string(),
@@ -1548,6 +1622,7 @@ mod tests {
 
         let model = ModelConfig::new("openai.gpt-5.6-terra");
         let provider = BedrockProvider {
+            documents_unsupported: AtomicBool::new(false),
             client: Client::new(&sdk_config),
             retry_config: RetryConfig::default(),
             name: "aws_bedrock".to_string(),
@@ -2029,13 +2104,14 @@ mod tests {
         let (provider, _) = create_mock_provider_and_model("openai.gpt-5.5");
         // Mantle models: the menu is the set of levels the Responses requests carry.
         for model in ["openai.gpt-5.5", "google.gemma-4-31b"] {
-            let entry = mantle_entry(model).unwrap();
+            let wire_model_id = mantle_model_id(model).unwrap();
             let mut sent: Vec<String> = Vec::new();
             for effort in ThinkingEffort::ALL {
                 let config = ModelConfig::new(model)
                     .with_canonical_limits("aws_bedrock")
                     .with_thinking_effort(effort);
-                let payload = mantle_request_payload(entry, &config, "", &[], &[]).unwrap();
+                let payload =
+                    mantle_request_payload(&wire_model_id, &config, "", &[], &[]).unwrap();
                 let level = payload
                     .pointer("/reasoning/effort")
                     .and_then(|level| level.as_str());
@@ -2125,6 +2201,7 @@ mod tests {
 
         let model = ModelConfig::new("google.gemma-4-31b");
         let provider = BedrockProvider {
+            documents_unsupported: AtomicBool::new(false),
             client: Client::new(&sdk_config),
             retry_config: RetryConfig::default(),
             name: "aws_bedrock".to_string(),
@@ -2188,6 +2265,27 @@ mod tests {
         for model in ["gpt-5.5", "gpt-5.5-high"] {
             let entry = find_model_entry(model).unwrap();
             assert_eq!(entry.endpoint, BedrockEndpoint::MantleResponses);
+        }
+    }
+
+    #[test]
+    fn test_gpt_routes_to_mantle_by_id_shape() {
+        for (model, expected) in [
+            ("openai.gpt-6-sol", Some("openai.gpt-6-sol")),
+            ("openai.gpt-6.1-sol-high", Some("openai.gpt-6.1-sol")),
+            ("gpt-6-astra", Some("openai.gpt-6-astra")),
+            ("openai.gpt-5.6-sol", Some("openai.gpt-5.6-sol")),
+            ("google.gemma-4-31b", Some("google.gemma-4-31b")),
+            ("openai.gpt-oss-120b-1:0", None),
+            ("us.openai.gpt-6-sol", None),
+            ("global.openai.gpt-6-sol", None),
+            (
+                "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.openai.gpt-6-sol",
+                None,
+            ),
+            ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", None),
+        ] {
+            assert_eq!(mantle_model_id(model).as_deref(), expected, "{model}");
         }
     }
 

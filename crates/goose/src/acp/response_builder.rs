@@ -1,4 +1,4 @@
-use crate::agents::{Agent, ExtensionLoadResult};
+use crate::agents::{ExtensionLoadResult, StateMachineServices};
 use crate::config::{Config, GooseMode};
 use crate::providers::inventory::{ProviderInventoryEntry, ProviderInventoryService};
 use crate::session::session_manager::SessionUsageTotals;
@@ -236,11 +236,11 @@ pub(super) fn build_mode_state(
 /// The provider decides whether goose owns the effort menu; a session without a
 /// live provider keeps the model-name based path.
 pub(super) async fn agent_thinking_effort_support(
-    agent: &Agent,
+    services: &StateMachineServices,
     session_id: &str,
     model_name: Option<&str>,
 ) -> ThinkingEffortSupport {
-    match (agent.provider(session_id).await, model_name) {
+    match (services.provider(session_id).await, model_name) {
         (Ok(provider), Some(model_name)) => {
             thinking_effort_support_for_model(provider.as_ref(), model_name)
         }

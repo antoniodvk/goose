@@ -50,7 +50,7 @@ fn stop_async_task_error(error: ProviderError) -> agent_client_protocol::Error {
     }
 }
 
-impl GooseAcpAgent {
+impl AcpConnection {
     fn supports_async_tasks(&self) -> bool {
         self.client_supports_async_tasks
             .get()
@@ -63,8 +63,8 @@ impl GooseAcpAgent {
     /// provider (load, reload) keeps its one subscription, so no update is
     /// passed on twice; a new provider (model or provider switch) replaces it,
     /// and the old one ends with its provider.
-    pub(super) async fn subscribe_async_tasks(&self, session_id: &str, agent: &Arc<Agent>) {
-        let Ok(provider) = agent.provider(session_id).await else {
+    pub(super) async fn subscribe_async_tasks(&self, session_id: &str) {
+        let Ok(provider) = self.services.provider(session_id).await else {
             return;
         };
         {
@@ -134,8 +134,8 @@ impl GooseAcpAgent {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, agent_client_protocol::Error> {
         let params: StopAsyncTaskParams = serde_json::from_value(params).invalid_params_err()?;
-        let agent = self.get_session_agent(&params.session_id).await?;
-        let provider = agent
+        let provider = self
+            .services
             .provider(&params.session_id)
             .await
             .invalid_params_err_ctx("Session has no provider")?;

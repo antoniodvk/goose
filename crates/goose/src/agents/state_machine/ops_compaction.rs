@@ -7,14 +7,14 @@ use async_trait::async_trait;
 use tracing_futures::Instrument;
 
 use crate::agents::state_machine::ops_llm::{chat_span, record_chat_usage};
+use crate::agents::state_machine::proactive_compaction::proactive_compaction_tokens;
 use crate::agents::state_machine::{
-    applied, last_effective_role, messages_since_kickoff, not_applicable, trailing_error,
-    yielded_with, ConversationEffect, Emitter, GooseEffect, Operation, OperationResult,
-    SlashCommand,
+    applied, messages_since_kickoff, not_applicable, trailing_error, yielded_with,
+    ConversationEffect, Emitter, GooseEffect, Operation, OperationResult, SlashCommand,
 };
-use crate::context_mgmt::{compact_messages, count_context_tokens, is_compaction_continuation};
+use crate::context_mgmt::{compact_messages, is_compaction_continuation};
 use crate::conversation::message::{Message, MessageErrorKind, SystemNotificationType};
-use crate::conversation::{Conversation, EffectiveRole};
+use crate::conversation::Conversation;
 use crate::providers::base::Provider;
 use crate::session::Session;
 use goose_providers::errors::ProviderError;
@@ -23,20 +23,6 @@ use goose_providers::model::ModelConfig;
 const COMPACTION_THINKING_TEXT: &str = "goose is compacting the conversation...";
 
 pub(super) const MAX_CONTEXT_ERROR_COMPACTIONS: usize = 2;
-
-/// Reported usage stops at the inference that requested the tools, so the
-/// results that answered it are not counted until the next request.
-async fn unreported_tool_tokens(conversation: &Conversation) -> Result<i32> {
-    let messages = conversation.messages();
-    if last_effective_role(messages)? != EffectiveRole::Tool {
-        return Ok(0);
-    }
-    let after_request = messages
-        .iter()
-        .rposition(Message::is_tool_call)
-        .map_or(0, |index| index + 1);
-    count_context_tokens(&messages[after_request..]).await
-}
 
 pub struct CompactionOperation {
     provider: Arc<dyn Provider>,
@@ -63,23 +49,9 @@ impl CompactionOperation {
         }
     }
 
-    fn over_threshold(&self, tokens: usize) -> bool {
-        if self.threshold <= 0.0 || self.threshold >= 1.0 {
-            return false;
-        }
-        (tokens as f64 / self.context_limit as f64) > self.threshold
-    }
-
-    async fn context_tokens(&self, session: &Session, conversation: &Conversation) -> Result<i32> {
-        match session.usage.total_tokens {
-            Some(tokens) => Ok(tokens + unreported_tool_tokens(conversation).await?),
-            None => count_context_tokens(conversation.messages()).await,
-        }
-    }
-
     fn command_error(
         conversation: &Conversation,
-        message: String,
+        error: &anyhow::Error,
         emit: &Emitter,
     ) -> Result<OperationResult<GooseEffect>> {
         let command = messages_since_kickoff(conversation)?
@@ -91,9 +63,7 @@ impl CompactionOperation {
             .clone()
             .ok_or_else(|| anyhow!("Persisted slash command message has no id"))?;
         let command = command.with_visibility(true, false);
-        let response = Message::assistant()
-            .with_text(message)
-            .with_visibility(true, false);
+        let response = compaction_failure_message(error).with_visibility(true, false);
         emit.message(command);
         let response = emit.message(response);
         yielded_with([
@@ -164,7 +134,7 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
             Ok(result) => result,
             Err(error) => {
                 span.record("error.type", "compaction_error");
-                return Self::command_error(conversation, error.to_string(), emit);
+                return Self::command_error(conversation, &error, emit);
             }
         };
         let compacted = result.conversation;
@@ -218,18 +188,21 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
                 return not_applicable();
             }
         } else {
-            // Compact only ahead of an inference; an assistant tail ends the turn.
-            if last_effective_role(messages)? == EffectiveRole::Assistant {
-                return not_applicable();
-            }
             // Compaction keeps the latest prompt whole, so a prompt above the threshold
             // leaves the context there; compacting again before the next inference
             // would repeat forever. A real overflow takes the bounded reactive path.
             if compacted_since_last_inference(messages) {
                 return not_applicable();
             }
-            let tokens = self.context_tokens(session, conversation).await?;
-            if tokens <= 0 || !self.over_threshold(tokens as usize) {
+            if proactive_compaction_tokens(
+                session,
+                conversation,
+                self.context_limit,
+                self.threshold,
+            )
+            .await?
+            .is_none()
+            {
                 return not_applicable();
             }
         }
