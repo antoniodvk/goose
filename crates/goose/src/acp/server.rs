@@ -129,6 +129,7 @@ mod providers;
 mod recipe;
 mod resources;
 mod schedule;
+mod skills_toggle;
 mod slash_commands;
 mod sources;
 mod tool_calls;

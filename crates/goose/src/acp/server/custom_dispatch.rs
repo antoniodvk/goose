@@ -22,6 +22,9 @@ impl AcpConnection {
             if async_tasks::is_stop_async_task_method(method) {
                 return self.on_stop_async_task(params).await;
             }
+            if skills_toggle::is_set_session_skills_method(method) {
+                return self.on_set_session_skills(params).await;
+            }
 
             self.handle_custom_request(cx, method, params).await
         }
