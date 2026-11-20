@@ -41,6 +41,7 @@ use crate::security::security_inspector::SecurityInspector;
 use crate::session::{Session, SessionManager};
 use crate::tool_inspection::ToolInspectionManager;
 use crate::tool_monitor::RepetitionInspector;
+use goose_agent::stop_hook::DEFAULT_DENY_LIMIT;
 use goose_providers::api_client::{ApiClient, AuthMethod};
 use goose_providers::errors::ProviderError;
 use goose_providers::thinking::{ThinkingEffort, ThinkingEffortSupport};
@@ -51,7 +52,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, warn};
 
-const DEFAULT_STOP_HOOK_BLOCK_CAP: u32 = 8;
 const AUTO_EFFORTS: [ThinkingEffort; 5] = [
     ThinkingEffort::Off,
     ThinkingEffort::Low,
@@ -121,6 +121,8 @@ pub struct TurnSettings {
     pub stop_hook_block_cap: u32,
     pub tool_pair_summarization: bool,
     pub tool_search: bool,
+    pub defer_tools: bool,
+    pub always_load_tools: Vec<String>,
     pub compaction_threshold: f64,
     pub compaction_token_limit: usize,
     /// `None` derives it from the context limit.
@@ -149,9 +151,20 @@ impl TurnSettings {
             ),
             stop_hook_block_cap: config
                 .get_param::<u32>("GOOSE_STOP_HOOK_BLOCK_CAP")
-                .unwrap_or(DEFAULT_STOP_HOOK_BLOCK_CAP),
+                .unwrap_or(DEFAULT_DENY_LIMIT),
             tool_pair_summarization: crate::context_mgmt::tool_pair_summarization_enabled(),
             tool_search: crate::agents::tool_search::enabled(),
+            defer_tools: config
+                .get_param::<String>("GOOSE_TOOL_DEFERRAL")
+                .is_ok_and(|value| value == "lookup"),
+            always_load_tools: config
+                .get_param::<String>("GOOSE_TOOL_DEFERRAL_ALWAYS_LOAD")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect(),
             compaction_threshold: config
                 .get_param::<f64>("GOOSE_AUTO_COMPACT_THRESHOLD")
                 .unwrap_or(crate::context_mgmt::DEFAULT_COMPACTION_THRESHOLD),
@@ -858,6 +871,8 @@ impl StateMachineServices {
             tool_call_cutoff,
             tool_pair_summarization: settings.tool_pair_summarization,
             tool_search: settings.tool_search,
+            defer_tools: settings.defer_tools,
+            always_load_tools: settings.always_load_tools.clone(),
             session_manager: self.session_manager.clone(),
             extension_manager: Arc::clone(&self.extension_manager),
             extension_lease,

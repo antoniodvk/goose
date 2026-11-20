@@ -276,6 +276,18 @@ impl TestPipeline {
         self
     }
 
+    pub(super) fn with_always_load_tools(mut self, tools: Vec<String>) -> Self {
+        assert!(!self.services.initialized());
+        self.turn_settings.always_load_tools = tools;
+        self
+    }
+
+    pub(super) fn with_deferred_tools(mut self) -> Self {
+        assert!(!self.services.initialized());
+        self.turn_settings.defer_tools = true;
+        self
+    }
+
     pub(super) fn with_max_turns(mut self, max_turns: u32) -> Self {
         self.max_turns = max_turns;
         self
@@ -918,6 +930,8 @@ async fn build_test_pipeline(
             stop_hook_block_cap: 3,
             tool_pair_summarization: true,
             tool_search: false,
+            defer_tools: false,
+            always_load_tools: Vec::new(),
             compaction_threshold: COMPACTION_THRESHOLD,
             compaction_token_limit: usize::MAX,
             tool_call_cutoff: None,
@@ -1233,13 +1247,15 @@ impl TestRun {
     }
 }
 
-const TOOL_OPERATIONS: [&str; 6] = [
+const TOOL_OPERATIONS: [&str; 7] = [
     "tool_approval",
+    "pre_tool_call_hook",
     "skills",
     "tool_search",
     "recipe",
     "tool_execution",
     "remaining_tool_calls",
+    "unhandled_tool_calls",
 ];
 
 fn assert_only_tool_operations_act_on_open_calls(session: &Session, applied_step: Option<&str>) {
