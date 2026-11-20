@@ -1008,7 +1008,7 @@ impl AcpConnection {
                 .await
                 .internal_err_ctx("Failed to resolve session provider")?;
             let context_limit = crate::context_limit::get_reported_context_limit(
-                &self.session_manager,
+                &self.services.session_manager,
                 &session,
                 provider.as_ref(),
                 &model_name,
@@ -1590,13 +1590,13 @@ impl AcpConnection {
                 } => {
                     let tool_meta = match tool_requests.get(id) {
                         Some(tool_request) => {
-                            permission_tool_meta(tool_request, &target.agent, &target.session_id)
+                            permission_tool_meta(tool_request, &self.services, &target.session_id)
                                 .await
                         }
                         None => {
                             listed_permission_tool_meta(
-                                &self.session_manager,
-                                &target.agent,
+                                &self.services.session_manager,
+                                &self.services,
                                 &target.session_id,
                                 id,
                                 tool_name,
@@ -1846,7 +1846,7 @@ fn extract_client_supports_recipe_param_requests(
 
 async fn permission_tool_meta(
     tool_request: &ToolRequest,
-    agent: &Agent,
+    services: &StateMachineServices,
     session_id: &str,
 ) -> Option<Meta> {
     let tool_name = tool_request.tool_call.as_ref().ok()?.name.to_string();
@@ -1854,7 +1854,7 @@ async fn permission_tool_meta(
         .tool_name_parts()
         .and_then(|parts| parts.extension_name)
         .map(ToString::to_string);
-    let read_only_hint = agent
+    let read_only_hint = services
         .list_tools(session_id, extension_name)
         .await
         .ok()
@@ -1869,7 +1869,7 @@ async fn permission_tool_meta(
 /// of the session that called it, so the client gets the same identity as for its own calls.
 async fn listed_permission_tool_meta(
     session_manager: &SessionManager,
-    agent: &Agent,
+    services: &StateMachineServices,
     session_id: &str,
     request_id: &str,
     tool_name: &str,
@@ -1878,7 +1878,7 @@ async fn listed_permission_tool_meta(
         .action_required()
         .answered_request(session_id, request_id)
         .ok()?;
-    let tool = agent
+    let tool = services
         .list_tools(&calling_session_id, None)
         .await
         .ok()?
@@ -2384,7 +2384,6 @@ impl AcpConnection {
     }
 
     async fn resolve_context_limit(
-        &self,
         session: &Session,
         services: &Arc<StateMachineServices>,
     ) -> Result<usize, agent_client_protocol::Error> {
@@ -2396,7 +2395,7 @@ impl AcpConnection {
             agent_client_protocol::Error::internal_error().data("Session has no model")
         })?;
         crate::context_limit::get_reported_context_limit(
-            &self.session_manager,
+            &services.session_manager,
             session,
             provider.as_ref(),
             &model.model_name,

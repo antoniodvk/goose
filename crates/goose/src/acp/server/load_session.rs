@@ -408,7 +408,8 @@ impl AcpConnection {
 
         if let Some(enabled) = meta_skills(args.meta.as_ref())? {
             set_skills_state(&mut session.extension_data, enabled)?;
-            self.session_manager
+            self.services
+                .session_manager
                 .update(&session_id_str)
                 .extension_data(session.extension_data.clone())
                 .apply()

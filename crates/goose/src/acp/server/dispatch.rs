@@ -220,19 +220,15 @@ impl HandleDispatchFrom<Client> for AcpConnectionHandler {
                             // A new model can have a different context window; report it now
                             // instead of waiting for the next turn or session/load.
                             if config_id == "model" || config_id == "provider" {
-                                let usage_result = match agent.get_session_agent(&session_id.0).await {
-                                    Ok(session_agent) => agent
-                                        .send_session_usage_updates(
-                                            &cx,
-                                            &session_id,
-                                            &session_id.0,
-                                            &session_agent,
-                                            &mut None,
-                                        )
-                                        .await
-                                        .map(|_| ()),
-                                    Err(e) => Err(e),
-                                };
+                                let usage_result = connection
+                                    .send_session_usage_updates(
+                                        &cx,
+                                        &session_id,
+                                        &session_id.0,
+                                        &mut None,
+                                    )
+                                    .await
+                                    .map(|_| ());
                                 if let Err(error) = usage_result {
                                     warn!(
                                         session_id = %session_id.0,

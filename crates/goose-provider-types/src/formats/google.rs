@@ -663,9 +663,11 @@ fn supports_thinking_level(model_name: &str, level: &str) -> bool {
 fn thinking_level_for_effort(model_name: &str, effort: ThinkingEffort) -> Option<ThinkingLevel> {
     let preferred: &[&str] = match effort {
         ThinkingEffort::Off => &["minimal"],
+        ThinkingEffort::Minimal => &["minimal", "low", "medium", "high"],
         ThinkingEffort::Low => &["low", "minimal", "medium", "high"],
         ThinkingEffort::Medium => &["medium", "low", "high"],
         ThinkingEffort::High => &["high", "medium", "xhigh", "low"],
+        ThinkingEffort::XHigh => &["xhigh", "high", "medium", "low"],
         ThinkingEffort::Max => &["xhigh", "high", "medium", "low"],
     };
     preferred
