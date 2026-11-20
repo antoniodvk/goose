@@ -37,10 +37,11 @@ impl StateMachineServices {
     /// Emit a lifecycle hook event with no extra context. Useful for events
     /// that have no matcher (e.g. `SessionStart`, `SessionEnd`).
     pub async fn emit_hook(&self, event: HookEvent, session_id: &str) {
-        if !self.hook_manager.has_hooks(event) {
+        let hook_manager = self.session_hooks(session_id).await;
+        if !hook_manager.has_hooks(event) {
             return;
         }
-        self.hook_manager
+        hook_manager
             .emit(event, HookContext::new(event, session_id))
             .await;
     }
@@ -49,11 +50,11 @@ impl StateMachineServices {
     /// banners, which the client shows before the first prompt.
     pub async fn emit_session_start(&self, session_id: &str) -> Result<Vec<String>> {
         let event = HookEvent::SessionStart;
-        if !self.hook_manager.has_hooks(event) {
+        let hook_manager = self.session_hooks(session_id).await;
+        if !hook_manager.has_hooks(event) {
             return Ok(Vec::new());
         }
-        let banners = self
-            .hook_manager
+        let banners = hook_manager
             .emit_collecting_banners(event, HookContext::new(event, session_id))
             .await;
         self.session_manager
@@ -63,8 +64,9 @@ impl StateMachineServices {
     }
 
     pub(crate) async fn emit_hooks_for_saved_prompt(&self, session_id: &str) -> Result<()> {
-        if !self.hook_manager.has_hooks(HookEvent::SessionStart)
-            && !self.hook_manager.has_hooks(HookEvent::UserPromptSubmit)
+        let hook_manager = self.session_hooks(session_id).await;
+        if !hook_manager.has_hooks(HookEvent::SessionStart)
+            && !hook_manager.has_hooks(HookEvent::UserPromptSubmit)
         {
             return Ok(());
         }
@@ -83,7 +85,7 @@ impl StateMachineServices {
             is_session_start_message(message)
                 || (is_user_prompt(message) && message.is_user_visible())
         }) {
-            self.hook_manager
+            hook_manager
                 .emit(
                     HookEvent::SessionStart,
                     HookContext::new(HookEvent::SessionStart, session_id)
@@ -100,7 +102,8 @@ impl StateMachineServices {
         if prompt.is_empty() {
             return;
         }
-        self.hook_manager
+        let hook_manager = self.hooks_for(&session.working_dir);
+        hook_manager
             .emit(
                 HookEvent::UserPromptSubmit,
                 HookContext::new(HookEvent::UserPromptSubmit, &session.id)

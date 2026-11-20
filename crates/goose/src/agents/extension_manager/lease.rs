@@ -125,9 +125,6 @@ impl ToolCatalog {
                     .to_string();
                 let mut tool = tool.clone();
                 tool.name = name.clone().into();
-                if extension.is_platform() {
-                    crate::agents::tool_texts::apply(&mut tool);
-                }
                 by_name.insert(name, entries.len());
                 entries.push(CatalogEntry {
                     tool,
@@ -255,7 +252,7 @@ impl McpLease {
             .entries
             .iter()
             .filter(|entry| entry.extension.key != key)
-            .map(|entry| (entry.tool.clone(), entry.extension.is_platform()))
+            .map(|entry| (entry.tool.clone(), false))
             .collect()
     }
 

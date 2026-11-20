@@ -85,8 +85,6 @@ impl ProviderDef for AntigravityAcpProvider {
                 (GooseMode::Approve, vec!["default".to_string()]),
                 // "accept-edits" accepts file edits but still asks for risky commands.
                 (GooseMode::SmartApprove, vec!["accept-edits".to_string()]),
-                // "plan" keeps the agent read-only, aligning with chat-only intent.
-                (GooseMode::Chat, vec!["plan".to_string()]),
             ]);
 
             let provider_config = AcpProviderConfig {

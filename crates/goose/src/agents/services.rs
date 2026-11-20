@@ -592,7 +592,7 @@ impl StateMachineServices {
     /// Hooks for a session working in `working_dir`: the plugins of that folder (project
     /// `.agents/plugins`, its settings, and the folder's copy written by the Goose App,
     /// `HookManager::load`), not of the process's directory, which a session does not share.
-    fn hooks_for(&self, working_dir: &Path) -> crate::hooks::HookManager {
+    pub(super) fn hooks_for(&self, working_dir: &Path) -> crate::hooks::HookManager {
         let mut slot = self
             .hook_manager
             .lock()
@@ -609,7 +609,7 @@ impl StateMachineServices {
         slot.1.clone()
     }
 
-    async fn session_hooks(&self, session_id: &str) -> crate::hooks::HookManager {
+    pub(super) async fn session_hooks(&self, session_id: &str) -> crate::hooks::HookManager {
         match self.session_manager.get_session(session_id, false).await {
             Ok(session) => self.hooks_for(&session.working_dir),
             Err(error) => {
@@ -618,38 +618,6 @@ impl StateMachineServices {
                 self.hooks_for(&dir)
             }
         }
-    }
-
-    /// Emit a lifecycle hook event with no extra context. Useful for events
-    /// that have no matcher (e.g. `SessionStart`, `SessionEnd`).
-    pub async fn emit_hook(&self, event: crate::hooks::HookEvent, session_id: &str) {
-        let hook_manager = self.session_hooks(session_id).await;
-        if !hook_manager.has_hooks(event) {
-            return;
-        }
-        hook_manager
-            .emit(event, crate::hooks::HookContext::new(event, session_id))
-            .await;
-    }
-
-    /// Fires `SessionStart` for a client opening the session and returns the hooks'
-    /// banners, which the client shows before the first prompt.
-    pub async fn emit_session_start(&self, session_id: &str) -> Result<Vec<String>> {
-        let event = crate::hooks::HookEvent::SessionStart;
-        let hook_manager = self.session_hooks(session_id).await;
-        if !hook_manager.has_hooks(event) {
-            return Ok(Vec::new());
-        }
-        let banners = hook_manager
-            .emit_collecting_banners(event, crate::hooks::HookContext::new(event, session_id))
-            .await;
-        self.session_manager
-            .add_message(
-                session_id,
-                &crate::agents::state_machine::session_start_message(&banners),
-            )
-            .await?;
-        Ok(banners)
     }
 
     pub async fn steer(&self, session_id: &str, message: Message) -> Result<()> {
@@ -933,8 +901,7 @@ impl StateMachineServices {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    self.config
-                        .session_manager
+                    self.session_manager
                         .update_tool_request_meta(
                             session_id,
                             request_id,

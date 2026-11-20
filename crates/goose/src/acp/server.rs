@@ -15,7 +15,6 @@ use crate::agents::extension_manager::ClientContext;
 use crate::agents::mcp_client::GooseMcpHostInfo;
 use crate::agents::state_machine::{
     has_unapplied_tool_confirmation_response, pending_tool_confirmations, readable_subagent_output,
-    turn_failure,
 };
 use crate::agents::{
     Attachment, ExtensionConfig, ExtensionLoadResult, GoosePlatform, SessionConfig,
@@ -2441,7 +2440,8 @@ impl AcpConnection {
             cx.send_notification(updates.custom)?;
         }
         let mut standard = updates.standard;
-        if let Some(signal) = agent
+        if let Some(signal) = self
+            .services
             .provider(session_id)
             .await
             .ok()

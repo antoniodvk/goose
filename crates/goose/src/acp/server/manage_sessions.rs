@@ -267,6 +267,7 @@ impl AcpConnection {
         req: SearchSessionsRequest,
     ) -> Result<SearchSessionsResponse, agent_client_protocol::Error> {
         let session_ids = self
+            .services
             .session_manager
             .search_session_ids(&req.query, &ACP_VISIBLE_SESSION_TYPES)
             .await

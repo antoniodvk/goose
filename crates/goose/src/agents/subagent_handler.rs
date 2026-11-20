@@ -93,7 +93,7 @@ impl ForegroundSubagentRunner {
     }
 
     pub(crate) fn background(&self) -> &crate::agents::background_subagents::BackgroundSubagents {
-        self.agent.background_subagents()
+        self.services.background_subagents()
     }
 
     pub(crate) async fn load(&self, subagent_id: &str) -> Result<Session> {

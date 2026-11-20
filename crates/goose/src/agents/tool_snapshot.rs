@@ -456,6 +456,7 @@ impl PlatformTools {
                 if !entry.unprefixed {
                     tool.name = format!("{}__{}", entry.key, server_name).into();
                 }
+                crate::agents::tool_texts::apply(&mut tool);
                 let mut meta = tool.meta.take().map(|meta| meta.0).unwrap_or_default();
                 meta.insert("goose_extension".to_string(), entry.key.clone().into());
                 tool.meta = Some(MetaObject(meta));
