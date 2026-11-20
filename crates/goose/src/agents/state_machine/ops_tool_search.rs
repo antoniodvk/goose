@@ -8,59 +8,56 @@ use rmcp::model::{CallToolResult, ContentBlock, ErrorData, Tool};
 use serde_json::Value;
 use tracing_futures::Instrument;
 
-use crate::agents::extension_manager::{ExtensionLease, ExtensionManager};
 use crate::agents::state_machine::ops_toolcalling::{
-    emit_post_tool_use, pending_advertised_tool_requests, run_pre_tool_hooks, session_lease,
-    tool_span, ToolDisposition,
+    pending_advertised_tool_requests, tool_span, ToolDisposition,
 };
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, Emitter, GooseEffect, Operation,
     OperationResult,
 };
-use crate::agents::tool_execution::{declined_response, CHAT_MODE_TOOL_SKIPPED_RESPONSE};
 use crate::agents::tool_search::{self, ToolPartition, ToolSearchParams, TOOL_SEARCH_TOOL_NAME};
-use crate::config::GooseMode;
+use crate::agents::tool_snapshot::ToolSnapshot;
+use crate::agents::StateMachineServices;
 use crate::conversation::message::Message;
 use crate::conversation::Conversation;
-use crate::hooks::HookManager;
 use crate::session::Session;
 
 pub struct ToolSearchOperation {
-    extension_manager: Arc<ExtensionManager>,
-    hook_manager: HookManager,
-    extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
+    services: Arc<StateMachineServices>,
+    tools: Arc<StdMutex<Option<Arc<ToolSnapshot>>>>,
     switched_on: bool,
 }
 
 impl ToolSearchOperation {
     pub fn new(
-        extension_manager: Arc<ExtensionManager>,
-        hook_manager: HookManager,
-        extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
+        services: Arc<StateMachineServices>,
+        tools: Arc<StdMutex<Option<Arc<ToolSnapshot>>>>,
         switched_on: bool,
     ) -> Self {
         Self {
-            extension_manager,
-            hook_manager,
-            extension_lease,
+            services,
+            tools,
             switched_on,
         }
     }
 
-    /// The deferrable tools of the session's lease, `None` while tool search does not apply.
+    /// The deferrable tools of the session's snapshot, `None` while tool search does not apply.
     async fn deferrable(&self, session: &Session) -> Result<Option<Vec<Tool>>> {
         if !self.switched_on {
             return Ok(None);
         }
-        let lease = session_lease(&self.extension_manager, &self.extension_lease, session).await?;
-        if !tool_search::active_for(self.switched_on, &lease) {
+        let snapshot = ToolSnapshot::for_session(&self.tools, &self.services, &session.id).await?;
+        if !tool_search::active_for(self.switched_on, &snapshot) {
             return Ok(None);
         }
-        let partition = ToolPartition::new(
-            lease
-                .tools_excluding_with_origin(crate::skills::EXTENSION_NAME)
-                .await,
-        );
+        let entries: Vec<_> = snapshot
+            .mcp
+            .tools()
+            .await
+            .into_iter()
+            .map(|tool| (tool, false))
+            .collect();
+        let partition = ToolPartition::new(entries);
         Ok((!partition.deferrable.is_empty()).then_some(partition.deferrable))
     }
 
@@ -153,56 +150,16 @@ impl Operation<Session, GooseEffect> for ToolSearchOperation {
         let mut response = Message::user();
         for (request, disposition) in pending {
             let result: std::result::Result<CallToolResult, ErrorData> = match disposition {
-                ToolDisposition::Execute if session.goose_mode == GooseMode::Chat => {
-                    Ok(CallToolResult::success(vec![ContentBlock::text(
-                        CHAT_MODE_TOOL_SKIPPED_RESPONSE,
-                    )]))
-                }
                 ToolDisposition::Execute => {
                     let tool_call = request.tool_call.as_ref().map_err(|error| {
                         anyhow!("tool_search tool call could not be parsed: {error}")
                     })?;
                     let span = tool_span(&tool_call.name, &request.id, &session.id);
-                    // Executed here rather than by ToolExecutionOperation, which dispatches only
-                    // extension tools; the hook lifecycle is the same, as for load_skill.
-                    let tool_input = tool_call
-                        .arguments
-                        .as_ref()
-                        .map(|arguments| Value::Object(arguments.clone()));
-                    match run_pre_tool_hooks(
-                        &self.hook_manager,
-                        session,
-                        &request.id,
-                        &tool_call.name,
-                        tool_input.as_ref(),
-                    )
-                    .instrument(span.clone())
-                    .await
-                    {
-                        Err(denial) => Err(denial),
-                        Ok(()) => {
-                            let mut output = Ok(self
-                                .execute(session, tool_call.arguments.as_ref())
-                                .instrument(span.clone())
-                                .await);
-                            emit_post_tool_use(
-                                &self.hook_manager,
-                                &session.id,
-                                &session.working_dir.to_string_lossy(),
-                                &tool_call.name,
-                                &request.id,
-                                tool_input.as_ref(),
-                                &mut output,
-                            )
-                            .instrument(span.clone())
-                            .await;
-                            output
-                        }
-                    }
+                    Ok(self
+                        .execute(session, tool_call.arguments.as_ref())
+                        .instrument(span)
+                        .await)
                 }
-                ToolDisposition::Decline => Ok(CallToolResult::error(vec![ContentBlock::text(
-                    declined_response(&request),
-                )])),
                 ToolDisposition::ParseError(error) => {
                     Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                         "The tool call could not be parsed: {error}. Correct the arguments and try again."

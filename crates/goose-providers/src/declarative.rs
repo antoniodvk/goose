@@ -20,6 +20,7 @@ pub(crate) mod declarative_providers {
         atomic_chat,
         celeris,
         cerebras,
+        cortecs,
         deepseek,
         empiriolabs,
         eurouter,
@@ -44,6 +45,7 @@ pub(crate) mod declarative_providers {
         nvidia,
         ollama_cloud,
         omlx,
+        onysoft,
         opencode_go,
         opencode_zen,
         opper,
@@ -433,6 +435,15 @@ mod tests {
             deserialize_provider_config(crate::groq::JSON).expect("groq.json should parse");
 
         assert!(!config.preserves_thinking);
+    }
+
+    #[test]
+    fn vercel_ai_gateway_json_refreshes_models_against_vercel_catalog() {
+        let config = deserialize_provider_config(crate::vercel_ai_gateway::JSON)
+            .expect("vercel_ai_gateway.json should parse");
+
+        assert_eq!(config.dynamic_models, Some(true));
+        assert_eq!(config.catalog_provider_id.as_deref(), Some("vercel"));
     }
 
     #[test]

@@ -80,7 +80,6 @@ impl ProviderDef for CodexAcpProvider {
                 (GooseMode::Auto, vec!["agent-full-access".to_string()]),
                 (GooseMode::SmartApprove, vec!["agent".to_string()]),
                 (GooseMode::Approve, vec!["read-only".to_string()]),
-                (GooseMode::Chat, vec!["read-only".to_string()]),
             ]);
 
             let provider_config = AcpProviderConfig {
@@ -355,7 +354,6 @@ mod tests {
                 true,
             ),
             ("approve", Some("approve"), ConfigFixture::Absent, true),
-            ("chat", Some("chat"), ConfigFixture::Absent, true),
             ("invalid", Some("invalid"), ConfigFixture::Absent, false),
             (
                 "configured_file",

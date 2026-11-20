@@ -402,8 +402,7 @@ pub fn get_usage(data: &Value) -> Result<Usage> {
     if let Some(usage_meta_data) = data.get("usageMetadata") {
         let input_tokens = usage_meta_data
             .get("promptTokenCount")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as i32);
+            .and_then(|v| v.as_i64());
         // `candidatesTokenCount` is the visible output; thinking models
         // (Gemini 2.5/3) report reasoning tokens separately in
         // `thoughtsTokenCount`, and per the API spec `totalTokenCount` =
@@ -414,25 +413,25 @@ pub fn get_usage(data: &Value) -> Result<Usage> {
         // includes thinking) adapters.
         let candidates_tokens = usage_meta_data
             .get("candidatesTokenCount")
-            .and_then(|v| v.as_u64());
+            .and_then(|v| v.as_i64());
         let thoughts_tokens = usage_meta_data
             .get("thoughtsTokenCount")
-            .and_then(|v| v.as_u64());
+            .and_then(|v| v.as_i64());
         let output_tokens = match (candidates_tokens, thoughts_tokens) {
             (None, None) => None,
-            (candidates, thoughts) => {
-                Some((candidates.unwrap_or(0) + thoughts.unwrap_or(0)) as i32)
-            }
+            (candidates, thoughts) => Some(
+                candidates
+                    .unwrap_or(0)
+                    .saturating_add(thoughts.unwrap_or(0)),
+            ),
         };
         let total_tokens = usage_meta_data
             .get("totalTokenCount")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as i32);
+            .and_then(|v| v.as_i64());
         // promptTokenCount already includes cachedContentTokenCount
         let cached_tokens = usage_meta_data
             .get("cachedContentTokenCount")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as i32);
+            .and_then(|v| v.as_i64());
         Ok(Usage::new(input_tokens, output_tokens, total_tokens)
             .with_cache_tokens(cached_tokens, None))
     } else {
@@ -615,6 +614,64 @@ enum ThinkingLevel {
     Low,
     Medium,
     High,
+    Xhigh,
+}
+
+impl ThinkingLevel {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            _ => None,
+        }
+    }
+}
+
+/// Gemini 3 replaced `thinkingBudget` with `thinkingLevel`, and later
+/// generations keep it, so any major version from 3 up takes the level path.
+fn uses_thinking_level(model_name: &str) -> bool {
+    let name = model_name.to_lowercase();
+    let name = name.rsplit('/').next().unwrap_or(&name);
+    name.strip_prefix("gemini-")
+        .map(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 3)
+}
+
+/// The catalog lists each model's levels (not every Gemini 4 model has
+/// `xhigh`); without a catalog entry only the levels every thinking-level
+/// model accepts are assumed.
+fn supports_thinking_level(model_name: &str, level: &str) -> bool {
+    match crate::canonical::maybe_get_canonical_model("google", model_name)
+        .and_then(|model| model.reasoning_efforts)
+    {
+        Some(levels) => levels.iter().any(|value| value == level),
+        None if model_name.to_lowercase().starts_with("gemini-3-pro") => {
+            ["low", "high"].contains(&level)
+        }
+        None => ["low", "medium", "high"].contains(&level),
+    }
+}
+
+fn thinking_level_for_effort(model_name: &str, effort: ThinkingEffort) -> Option<ThinkingLevel> {
+    let preferred: &[&str] = match effort {
+        ThinkingEffort::Off => &["minimal"],
+        ThinkingEffort::Low => &["low", "minimal", "medium", "high"],
+        ThinkingEffort::Medium => &["medium", "low", "high"],
+        ThinkingEffort::High => &["high", "medium", "xhigh", "low"],
+        ThinkingEffort::Max => &["xhigh", "high", "medium", "low"],
+    };
+    preferred
+        .iter()
+        .find(|level| supports_thinking_level(model_name, level))
+        .and_then(|level| ThinkingLevel::parse(level))
 }
 
 #[derive(Serialize)]
@@ -709,13 +766,14 @@ fn get_thinking_config(
     if model_config.reasoning == Some(false)
         || model_config.thinking_effort() == Some(ThinkingEffort::Off)
     {
-        let model_name = model_config.model_name.to_lowercase();
-        if model_name.starts_with("gemini-3.5") || model_name.starts_with("gemini-3.6") {
-            return Some(ThinkingConfig {
-                thinking_level: Some(ThinkingLevel::Minimal),
-                thinking_budget: None,
-                include_thoughts: false,
-            });
+        if uses_thinking_level(&model_config.model_name) {
+            return thinking_level_for_effort(&model_config.model_name, ThinkingEffort::Off).map(
+                |level| ThinkingConfig {
+                    thinking_level: Some(level),
+                    thinking_budget: None,
+                    include_thoughts: false,
+                },
+            );
         }
         // Gemini 2.5 Flash defaults to dynamic thinking; only an explicit budget
         // of 0 turns it off. Other families can't be disabled, so leave them unset.
@@ -732,14 +790,16 @@ fn get_thinking_config(
         }
         return None;
     }
-    let model_name = model_config.model_name.to_lowercase();
-    let is_gemini_3 = is_gemini_3_or_newer(&model_name);
-    let is_gemini_25 = model_name.starts_with("gemini-2.5");
-    if !is_gemini_3 && !is_gemini_25 {
+    let is_thinking_level_model = uses_thinking_level(&model_config.model_name);
+    let is_gemini_25 = model_config
+        .model_name
+        .to_lowercase()
+        .starts_with("gemini-2.5");
+    if !is_thinking_level_model && !is_gemini_25 {
         return None;
     }
 
-    if is_gemini_3 {
+    if is_thinking_level_model {
         // A chosen effort was handled above; without one the model's default applies.
         None
     } else {
@@ -796,7 +856,7 @@ pub fn create_request_with_thinking_budget(
     };
 
     let thinking_config = get_thinking_config(provider, model_config, thinking_budget);
-    let temperature = (!is_gemini_3_or_newer(&model_config.model_name))
+    let temperature = (!uses_thinking_level(&model_config.model_name))
         .then(|| model_config.temperature.map(|t| t as f64))
         .flatten();
 
@@ -813,7 +873,7 @@ pub fn create_request_with_thinking_budget(
         system_instruction: SystemInstruction {
             parts: [TextPart { text: system }],
         },
-        contents: format_messages(messages, is_gemini_3_or_newer(&model_config.model_name)),
+        contents: format_messages(messages, uses_thinking_level(&model_config.model_name)),
         tools: tools_wrapper,
         generation_config,
     };
@@ -1986,6 +2046,31 @@ data: [DONE]"#;
             .unwrap()
             .to_string();
         assert!(declared.contains(&sent), "{sent}");
+
+    fn thinking_level_json(model: &str, effort: ThinkingEffort) -> Value {
+        let config = ModelConfig::new(model).with_thinking_effort(effort);
+        let payload = create_request(&config, "system", &[], &[]).unwrap();
+        payload["generationConfig"]["thinkingConfig"]["thinkingLevel"].clone()
+    }
+
+    #[test]
+    fn test_max_effort_uses_xhigh_only_where_the_catalog_lists_it() {
+        assert_eq!(
+            thinking_level_json("gemini-4-hydrogen", ThinkingEffort::Max),
+            json!("xhigh")
+        );
+        assert_eq!(
+            thinking_level_json("gemini-4-neon", ThinkingEffort::Max),
+            json!("xhigh")
+        );
+        assert_eq!(
+            thinking_level_json("gemini-4-argon", ThinkingEffort::Max),
+            json!("high")
+        );
+        assert_eq!(
+            thinking_level_json("gemini-4-hydrogen", ThinkingEffort::High),
+            json!("high")
+        );
     }
 
     #[test]

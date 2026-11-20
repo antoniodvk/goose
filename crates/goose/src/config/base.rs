@@ -1489,6 +1489,12 @@ pub fn load_init_config_from_workspace() -> Result<Mapping, ConfigError> {
     parse_yaml_content(&init_content)
 }
 
+impl crate::agents::extension_config::ExtensionConfigResolver for Config {
+    fn get_secret(&self, key: &str) -> anyhow::Result<String> {
+        Ok(self.get_secret::<String>(key)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1504,12 +1510,7 @@ mod tests {
             Config::new_with_file_secrets(config_file.path(), secrets_file.path()).unwrap();
 
         assert_eq!(config.resolve_goose_mode().unwrap(), GooseMode::Auto);
-        for mode in [
-            GooseMode::Auto,
-            GooseMode::SmartApprove,
-            GooseMode::Approve,
-            GooseMode::Chat,
-        ] {
+        for mode in [GooseMode::Auto, GooseMode::SmartApprove, GooseMode::Approve] {
             config.set_goose_mode(mode).unwrap();
             assert_eq!(config.resolve_goose_mode().unwrap(), mode);
         }

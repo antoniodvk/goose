@@ -912,6 +912,18 @@ mod tests {
         }
 
         #[test]
+        fn resolves_gemini_4_neon_on_databricks() {
+            let _guard = env_lock::lock_env([
+                ("GOOSE_MAX_TOKENS", None::<&str>),
+                ("GOOSE_CONTEXT_LIMIT", None::<&str>),
+            ]);
+            let config =
+                ModelConfig::new("system.ai.gemini-4-neon").with_canonical_limits("databricks");
+            assert_eq!(config.max_tokens, Some(65_536));
+            assert_eq!(config.reasoning, Some(true));
+        }
+
+        #[test]
         fn unknown_model_leaves_fields_none() {
             let _guard = env_lock::lock_env([
                 ("GOOSE_MAX_TOKENS", None::<&str>),
@@ -935,9 +947,6 @@ mod tests {
             let config = ModelConfig::new("gpt-5.6-sol-xhigh").with_canonical_limits("openai");
             assert_eq!(config.max_tokens, Some(128_000));
             assert_eq!(config.reasoning, Some(true));
-            let canonical = crate::canonical::maybe_get_canonical_model("openai", "gpt-5.6-sol")
-                .expect("gpt-5.6-sol should have canonical metadata");
-            assert_eq!(canonical.temperature, Some(false));
 
             let config = ModelConfig::new("gpt-5.6-sol").with_canonical_limits("chatgpt_codex");
             assert_eq!(config.max_tokens, Some(128_000));

@@ -20,7 +20,7 @@ use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::agents::extension_manager::ExtensionLease;
+use crate::agents::tool_snapshot::ToolSnapshot;
 use crate::config::Config;
 use crate::conversation::message::{Message, MessageContent};
 
@@ -42,15 +42,15 @@ pub fn enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Tool search applies to this lease: switched on (`enabled()`, read once per reply) and not in
+/// Tool search applies to this snapshot: switched on (`enabled()`, read once per reply) and not in
 /// code mode, where tools are reached through `execute_javascript` instead of the tool list.
-pub(crate) fn active_for(switched_on: bool, lease: &ExtensionLease) -> bool {
+pub(crate) fn active_for(switched_on: bool, tools: &ToolSnapshot) -> bool {
     #[cfg(feature = "code-mode")]
-    if lease.is_enabled(crate::agents::platform_extensions::code_execution::EXTENSION_NAME) {
+    if tools.is_enabled(crate::agents::platform_extensions::code_execution::EXTENSION_NAME) {
         return false;
     }
     #[cfg(not(feature = "code-mode"))]
-    let _ = lease;
+    let _ = tools;
     switched_on
 }
 

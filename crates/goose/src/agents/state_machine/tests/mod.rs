@@ -1,20 +1,21 @@
 use anyhow::Result;
 
 use self::calculator_extension::{value, ADD};
-use self::pipeline::MessageKind::{Agent, ToolCall};
+use self::pipeline::MessageKind::{Agent, Error, ToolCall};
 use self::pipeline::{test_pipeline, MAX_TURNS};
-use crate::agents::state_machine;
 use crate::agents::state_machine::ops_retry::NUDGED;
 use crate::agents::state_machine::Emitter;
 use crate::session::extension_data::{EnabledExtensionsState, ExtensionData, ExtensionState};
+use goose_agent::max_turns::MAX_TURNS_MESSAGE;
 
+mod advertised_tools;
 mod agent_reply;
 mod calculator_extension;
 mod cancellation;
 mod compaction_lifecycle;
 mod context_relevance;
 mod dummy_api;
-mod hooks_lifecycle;
+pub(super) mod hooks_lifecycle;
 mod pipeline;
 mod prompt_skill_lifecycle;
 mod provider_lifecycle;
@@ -68,7 +69,8 @@ async fn capture_state_machine_trace_fields(
     super::session::run(
         &machine,
         pipeline.session_manager.as_ref(),
-        &pipeline.services().await.hook_manager,
+        &crate::hooks::HookManager::default(),
+        &Default::default(),
         &pipeline.session_id,
         &emit,
     )
@@ -196,8 +198,12 @@ async fn max_turns_counts_inference_calls_and_injects_budget() -> Result<()> {
     let first_budgeted_call = MAX_TURNS.div_ceil(2) as usize;
     assert!(!calls[first_budgeted_call - 1].input_contains("<turn-budget>"));
     assert!(calls[first_budgeted_call].input_contains("<turn-budget>"));
-    result.assert_message(-1, Agent, state_machine::MAX_TURNS_MESSAGE);
-    result.assert_emitted_message_matches_persisted(state_machine::MAX_TURNS_MESSAGE);
+    result.assert_message(-1, Error, MAX_TURNS_MESSAGE);
+    result.assert_emitted_message_matches_persisted(MAX_TURNS_MESSAGE);
+    assert_eq!(
+        result.conversation().last().unwrap().error_kind(),
+        Some(crate::conversation::message::MessageErrorKind::ResourceExhausted)
+    );
 
     Ok(())
 }
@@ -230,7 +236,7 @@ async fn auto_effort_is_scoped_to_each_turn_and_reused_across_inferences() -> Re
         .into_iter()
         .find(|skill| skill.name == "auto-effort-review")
         .expect("project skill should be installed");
-    let expanded_skill_prompt = crate::skills::loaded_skill_context_with_args(&skill, None)?;
+    let expanded_skill_prompt = goose_agent::skills::loaded_skill_context(&skill, &skill.content);
 
     let jev = MockServer::start().await;
     for (request, effort) in [
@@ -505,7 +511,7 @@ async fn grind_is_bounded_by_max_turns() -> Result<()> {
     let result = pipeline.run(["go"]).await?;
 
     assert_eq!(api.call_count(), MAX_TURNS as usize);
-    result.assert_message(-1, Agent, state_machine::MAX_TURNS_MESSAGE);
+    result.assert_message(-1, Error, MAX_TURNS_MESSAGE);
 
     Ok(())
 }

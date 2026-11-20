@@ -140,8 +140,7 @@ mod tests {
                 .await
                 .unwrap();
             services
-                .extension_manager
-                .enable(
+                .enable_extension(
                     &session.id,
                     ExtensionConfig::Platform {
                         name: SCHEDULER_EXTENSION_NAME.to_string(),
@@ -463,7 +462,7 @@ mod tests {
         use async_trait::async_trait;
         use goose::agents::SessionConfig;
         use goose::config::GooseMode;
-        use goose::conversation::message::{Message, MessageContent};
+        use goose::conversation::message::{Message, MessageContent, MessageErrorKind};
         use goose::providers::base::{
             stream_from_single_message, MessageStream, Provider, ProviderDef, ProviderMetadata,
         };
@@ -604,16 +603,12 @@ mod tests {
                 responses.len()
             );
 
-            // Look for the max turns message as the last response
             let last_response = responses.last().unwrap();
-            let last_content = last_response.content.first().unwrap();
-            if let MessageContent::Text(text_content) = last_content {
-                assert!(text_content.text.contains(
-                    "I've reached the maximum number of actions I can do without user input"
-                ));
-            } else {
-                panic!("Expected text content in last message");
-            }
+            let error = last_response.error().expect("expected max turns error");
+            assert_eq!(error.kind, MessageErrorKind::ResourceExhausted);
+            assert!(error.message.contains(
+                "I've reached the maximum number of actions I can do without user input"
+            ));
             Ok(())
         }
     }
@@ -941,8 +936,7 @@ mod tests {
             };
 
             services
-                .extension_manager
-                .enable(&session_id, ext_config)
+                .enable_extension(&session_id, ext_config)
                 .await
                 .expect("Failed to add extension manager");
             (services, session_id, temp_dir)
@@ -2027,8 +2021,8 @@ mod tests {
         use std::sync::Arc;
 
         struct FixedUsageProvider {
-            input_tokens: i32,
-            output_tokens: i32,
+            input_tokens: i64,
+            output_tokens: i64,
         }
 
         #[async_trait]
@@ -2239,10 +2233,7 @@ mod tests {
                     &session_id,
                 )
                 .await?;
-            services
-                .extension_manager
-                .enable(&session_id, extension)
-                .await?;
+            services.enable_extension(&session_id, extension).await?;
 
             let stream = services
                 .reply(
@@ -2587,12 +2578,12 @@ mod tests {
             Ok(())
         }
 
-        /// An empty response with a queued steer hands the turn to the steer
-        /// rather than the empty-turn fallback, but the empty assistant message
-        /// must still not be persisted ahead of the steer.
         #[tokio::test]
-        async fn test_empty_response_with_steer_drops_empty_message() -> Result<()> {
-            let services = StateMachineServices::with_config(StateMachineServicesConfig::cli());
+        async fn test_empty_response_with_steer_persists_empty_message() -> Result<()> {
+            let services = StateMachineServices::with_config(StateMachineServicesConfig {
+                disable_session_naming: true,
+                ..StateMachineServicesConfig::cli()
+            });
             let session = services
                 .session_manager
                 .create_session(
@@ -2614,7 +2605,7 @@ mod tests {
             // (empty) turn instead of being drained at the loop's start.
             services
                 .steer(&session.id, Message::user().with_text("keep going"))
-                .await;
+                .await?;
 
             let session_id = session.id.clone();
             let session_config = SessionConfig {
@@ -2646,9 +2637,12 @@ mod tests {
                 .map(|c| c.messages().to_vec())
                 .unwrap_or_default();
 
-            assert!(
-                !persisted.iter().any(is_empty_assistant),
-                "empty assistant turn must not be persisted before the steer: {persisted:?}"
+            assert_eq!(
+                persisted
+                    .iter()
+                    .filter(|message| is_empty_assistant(message))
+                    .count(),
+                1
             );
             assert!(
                 persisted
