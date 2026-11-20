@@ -733,6 +733,7 @@ fn gemini_thinking_level(level: &str) -> Option<ThinkingLevel> {
         "low" => Some(ThinkingLevel::Low),
         "medium" => Some(ThinkingLevel::Medium),
         "high" => Some(ThinkingLevel::High),
+        "xhigh" => Some(ThinkingLevel::Xhigh),
         _ => None,
     }
 }
@@ -2046,6 +2047,7 @@ data: [DONE]"#;
             .unwrap()
             .to_string();
         assert!(declared.contains(&sent), "{sent}");
+    }
 
     fn thinking_level_json(model: &str, effort: ThinkingEffort) -> Value {
         let config = ModelConfig::new(model).with_thinking_effort(effort);
