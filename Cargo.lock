@@ -4075,6 +4075,7 @@ dependencies = [
  "jsonschema",
  "keyring",
  "libc",
+ "lopdf 0.45.0",
  "lru 0.19.0",
  "minijinja",
  "mockall",
@@ -4329,7 +4330,7 @@ dependencies = [
  "image 0.24.9",
  "include_dir",
  "indoc",
- "lopdf",
+ "lopdf 0.47.0",
  "once_cell",
  "process-wrap 9.1.0",
  "rmcp",
@@ -5819,6 +5820,33 @@ dependencies = [
  "scoped-tls",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "lopdf"
+version = "0.45.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfffda0fe1ab0157e1a13c14bebd3f28671f2fccb7922f0722ec53926e6922d3"
+dependencies = [
+ "aes 0.9.3",
+ "bitflags 2.13.2",
+ "brotli-decompressor",
+ "cbc",
+ "ecb",
+ "encoding_rs",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap 2.14.2",
+ "itoa",
+ "log",
+ "md-5",
+ "nom 8.0.0",
+ "rand 0.10.3",
+ "rangemap",
+ "sha2 0.11.1",
+ "stringprep",
+ "thiserror 2.0.21",
+ "weezl 0.2.1",
 ]
 
 [[package]]
