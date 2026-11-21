@@ -729,17 +729,6 @@ pub fn gemini_reasoning_efforts(provider: &str, model_name: &str) -> Option<Vec<
     Some(levels.iter().map(|level| (*level).to_string()).collect())
 }
 
-fn gemini_thinking_level(level: &str) -> Option<ThinkingLevel> {
-    match level {
-        "minimal" => Some(ThinkingLevel::Minimal),
-        "low" => Some(ThinkingLevel::Low),
-        "medium" => Some(ThinkingLevel::Medium),
-        "high" => Some(ThinkingLevel::High),
-        "xhigh" => Some(ThinkingLevel::Xhigh),
-        _ => None,
-    }
-}
-
 fn get_thinking_config(
     provider: &str,
     model_config: &ModelConfig,
@@ -757,7 +746,7 @@ fn get_thinking_config(
                 &model_config.model_name,
                 effort,
             )
-            .and_then(|level| gemini_thinking_level(&level))?;
+            .and_then(|level| ThinkingLevel::parse(&level))?;
             return Some(ThinkingConfig {
                 thinking_level: Some(thinking_level),
                 thinking_budget: None,

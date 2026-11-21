@@ -361,7 +361,6 @@ fn create_codex_request(
         "model": model_config.model_name,
         "input": input_items,
         "store": false,
-        "include": ["reasoning.encrypted_content"],
         "instructions": system,
         "include": ["reasoning.encrypted_content"],
     });

@@ -2118,7 +2118,10 @@ mod tests {
             messages.last().unwrap().as_concat_text(),
             "Now check the tests too"
         );
-        assert_eq!(FinalOutputTool::successful_output(messages), None);
+        assert_eq!(
+            FinalOutputTool::latest_turn_output(resumed.conversation.as_ref().unwrap()),
+            None
+        );
         Ok(())
     }
 
