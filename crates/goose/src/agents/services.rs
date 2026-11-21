@@ -568,10 +568,7 @@ impl StateMachineServices {
             disable_session_naming: config.disable_session_naming,
             runtime: SessionRuntime::new(config.max_sessions),
             hook_manager_fixed: config.hooks.is_some(),
-            hook_manager: std::sync::Mutex::new((
-                None,
-                config.hooks.unwrap_or_default(),
-            )),
+            hook_manager: std::sync::Mutex::new((None, config.hooks.unwrap_or_default())),
             background_subagents: BackgroundSubagents::default(),
             turn_settings: config.turn_settings,
         });

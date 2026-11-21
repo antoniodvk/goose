@@ -90,8 +90,7 @@ use uuid::Uuid;
 
 use self::message_meta::{
     content_chunk_for_message, error_chunk_for_message, live_transcript_chunk,
-    message_meta_without_steer,
-    populate_output_token_limit_content,
+    message_meta_without_steer, populate_output_token_limit_content,
 };
 use self::tool_calls::chain::{breaks_consecutive_tool_calls, ReadyToolChain, ToolChainTracker};
 use self::tool_calls::conversion::{
@@ -1323,10 +1322,7 @@ impl AcpConnection {
                     break;
                 };
                 let subagent_id = event.subagent_id.clone();
-                if let Err(error) = server
-                    .forward_background_subagent_event(&cx, event)
-                    .await
-                {
+                if let Err(error) = server.forward_background_subagent_event(&cx, event).await {
                     warn!(%subagent_id, ?error, "Failed to forward a background subagent event");
                 }
             }

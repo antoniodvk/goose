@@ -353,8 +353,7 @@ impl Provider for LiteLLMProvider {
                 .and_then(|info| info.supports_vision);
         }
 
-        let mut payload =
-            self.request_payload(&effective_model_config, system, messages, tools)?;
+        let mut payload = self.request_payload(&effective_model_config, system, messages, tools)?;
 
         if !model_config.prompt_cache_disabled() && self.supports_cache_control(model_config).await
         {
