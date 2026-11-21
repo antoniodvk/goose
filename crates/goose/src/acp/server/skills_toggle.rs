@@ -16,7 +16,7 @@ pub(super) fn is_set_session_skills_method(method: &str) -> bool {
     method == SET_SESSION_SKILLS_METHOD
 }
 
-impl GooseAcpAgent {
+impl AcpConnection {
     pub(super) async fn on_set_session_skills(
         &self,
         params: serde_json::Value,
@@ -32,6 +32,7 @@ impl GooseAcpAgent {
         }
 
         let mut session = self
+            .services
             .session_manager
             .get_session(session_id, false)
             .await
@@ -41,7 +42,8 @@ impl GooseAcpAgent {
             })?;
 
         set_skills_state(&mut session.extension_data, req.enabled)?;
-        self.session_manager
+        self.services
+            .session_manager
             .update(&session.id)
             .extension_data(session.extension_data)
             .apply()
