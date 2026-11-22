@@ -498,8 +498,8 @@ pub enum ContentBlockPart {
     },
 }
 
-/// The reasoning items and `phase` stored with this tool call, if the model that
-/// produced them is `model_name`. Reasoning is only valid for that model.
+/// The `phase` stored with this tool call, if the model that produced it is
+/// `model_name`.
 pub fn replay_for<'a>(request: &'a ToolRequest, model_name: &str) -> Option<&'a Value> {
     request
         .metadata
@@ -524,10 +524,9 @@ pub fn stamp_replay_model(message: &mut Message, model_name: &str) {
     }
 }
 
-/// Sends the encrypted reasoning and the `phase` of the assistant text before a
-/// tool call back with that call, as OpenAI asks for when `store` is false.
-/// Reasoning is only stored when the request asked for it
-/// (`include: ["reasoning.encrypted_content"]`).
+/// Sends encrypted reasoning (via `Thinking`) and the `phase` of the assistant
+/// text before a tool call back with that call, as OpenAI asks for when `store`
+/// is false.
 fn add_message_items(
     input_items: &mut Vec<Value>,
     messages: &[Message],
@@ -541,7 +540,6 @@ fn add_message_items(
         };
 
         let mut text_items = Vec::new();
-        let mut emitted_thinking_reasoning = false;
 
         for content in &message.content {
             match content {
@@ -563,30 +561,18 @@ fn add_message_items(
                 // Streamed text is stored ahead of the reasoning that produced it,
                 // so pending text is left to flush after the reasoning item.
                 MessageContentBlock::Thinking(thinking) if message.role == Role::Assistant => {
-                    if let Some(item) = reasoning_input_item(message, thinking, current_model) {
-                        input_items.push(item);
-                        emitted_thinking_reasoning = true;
-                    }
+                    input_items.extend(reasoning_input_item(message, thinking, current_model));
                 }
                 MessageContentBlock::ToolRequest(request) if message.role == Role::Assistant => {
-                    // The model reasons first, then writes its preamble, then calls
-                    // the tool; the preamble is still buffered in `text_items`.
-                    let replay = replay_for(request, current_model);
-                    if !emitted_thinking_reasoning {
-                        if let Some(reasoning) = replay
-                            .and_then(|replay| replay.get("reasoning"))
-                            .and_then(Value::as_array)
-                        {
-                            input_items.extend(reasoning.iter().cloned());
-                        }
-                    }
                     if !text_items.is_empty() {
                         let mut item = json!({
                             "type": "message",
                             "role": role,
                             "content": text_items
                         });
-                        if let Some(phase) = replay.and_then(|replay| replay.get("phase")) {
+                        if let Some(phase) = replay_for(request, current_model)
+                            .and_then(|replay| replay.get("phase"))
+                        {
                             item["phase"] = phase.clone();
                         }
                         input_items.push(item);
@@ -873,10 +859,6 @@ pub fn create_responses_request_for_model(
             .insert("reasoning".to_string(), Value::Object(reasoning));
     }
 
-    if is_reasoning_model {
-        payload["include"] = json!(["reasoning.encrypted_content"]);
-    }
-
     if !tools.is_empty() {
         let tools_spec: Vec<Value> = tools
             .iter()
@@ -986,6 +968,22 @@ pub fn create_responses_request_for_model(
         }
     }
 
+    if is_reasoning_model && !store {
+        let include = payload
+            .as_object_mut()
+            .unwrap()
+            .entry("include")
+            .or_insert_with(|| json!([]));
+        if let Some(include) = include.as_array_mut() {
+            if !include
+                .iter()
+                .any(|item| item == "reasoning.encrypted_content")
+            {
+                include.push(json!("reasoning.encrypted_content"));
+            }
+        }
+    }
+
     Ok(payload)
 }
 
@@ -1067,7 +1065,6 @@ pub fn responses_api_to_message(response: &ResponsesApiResponse) -> anyhow::Resu
                 ..
             } => {
                 content.extend(reasoning_from_output(summary, encrypted_content.as_deref()));
-                pending_replay.add_reasoning(summary, encrypted_content.as_deref());
             }
             ResponseOutputItem::Message {
                 content: msg_content,
@@ -1145,47 +1142,19 @@ pub fn get_responses_usage(response: &ResponsesApiResponse) -> Usage {
         .map_or_else(Usage::default, ResponseUsage::to_usage)
 }
 
-/// Reasoning and `phase` seen since the last tool call of a response, waiting
-/// for the tool call that carries them. A text-only answer has no tool call: the
-/// model only needs them back within the turn, which ends with that answer.
+/// `phase` seen since the last tool call of a response, waiting for the tool
+/// call that carries it. A text-only answer has no tool call: the model only
+/// needs `phase` back within the turn, which ends with that answer.
 #[derive(Default)]
 struct PendingReplay {
-    reasoning: Vec<Value>,
     phase: Option<String>,
 }
 
 impl PendingReplay {
-    /// Keeps a reasoning item for replay. Only an item with encrypted content
-    /// can go back: with `store: false` there is no stored id to point at.
-    fn add_reasoning(&mut self, summary: &[SummaryText], encrypted_content: Option<&str>) {
-        let Some(encrypted_content) = encrypted_content else {
-            return;
-        };
-        let summary: Vec<Value> = summary
-            .iter()
-            .map(|s| json!({ "type": "summary_text", "text": s.text }))
-            .collect();
-        self.reasoning.push(json!({
-            "type": "reasoning",
-            "summary": summary,
-            "encrypted_content": encrypted_content,
-        }));
-    }
-
     fn take_metadata(&mut self) -> Option<ProviderMetadata> {
-        if self.reasoning.is_empty() && self.phase.is_none() {
-            return None;
-        }
+        let phase = self.phase.take()?;
         let mut replay = serde_json::Map::new();
-        if !self.reasoning.is_empty() {
-            replay.insert(
-                "reasoning".to_string(),
-                Value::Array(std::mem::take(&mut self.reasoning)),
-            );
-        }
-        if let Some(phase) = self.phase.take() {
-            replay.insert("phase".to_string(), Value::String(phase));
-        }
+        replay.insert("phase".to_string(), Value::String(phase));
         let mut metadata = ProviderMetadata::new();
         metadata.insert(RESPONSES_REPLAY_KEY.to_string(), Value::Object(replay));
         Some(metadata)
@@ -1211,7 +1180,6 @@ fn process_streaming_output_items(
                     &summary,
                     encrypted_content.as_deref(),
                 ));
-                pending_replay.add_reasoning(&summary, encrypted_content.as_deref());
             }
             ResponseOutputItemInfo::Message {
                 content: parts,
@@ -1919,16 +1887,19 @@ mod tests {
             .collect();
         assert_eq!(tool_requests.len(), 2);
 
-        let replay = replay_of(tool_requests[0]).expect("first tool call carries the replay");
+        let thinking: Vec<_> = content
+            .iter()
+            .filter_map(|c| match c {
+                MessageContentBlock::Thinking(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking.len(), 1);
+        assert_eq!(thinking[0].signature, "enc-1");
+
+        let replay = replay_of(tool_requests[0]).expect("first tool call carries phase");
         assert_eq!(replay["phase"], "commentary");
-        assert_eq!(replay["reasoning"].as_array().map(Vec::len), Some(1));
-        assert_eq!(replay["reasoning"][0]["type"], "reasoning");
-        assert_eq!(replay["reasoning"][0]["encrypted_content"], "enc-1");
-        assert_eq!(replay["reasoning"][0]["summary"], json!([]));
-        assert!(
-            replay["reasoning"][0].get("id").is_none(),
-            "a stored id does not exist with store: false"
-        );
+        assert!(replay.get("reasoning").is_none());
         assert!(replay_of(tool_requests[1]).is_none());
 
         Ok(())
@@ -1959,14 +1930,17 @@ mod tests {
             false,
         )?;
 
-        assert_eq!(
-            replay_of(&content[0]).unwrap()["reasoning"][0]["encrypted_content"],
-            "enc-1"
-        );
-        assert_eq!(
-            replay_of(&content[1]).unwrap()["reasoning"][0]["encrypted_content"],
-            "enc-2"
-        );
+        assert_eq!(content.len(), 4);
+        match &content[0] {
+            MessageContentBlock::Thinking(t) => assert_eq!(t.signature, "enc-1"),
+            other => panic!("expected thinking before call_1, got {other:?}"),
+        }
+        assert!(matches!(&content[1], MessageContentBlock::ToolRequest(r) if r.id == "call_1"));
+        match &content[2] {
+            MessageContentBlock::Thinking(t) => assert_eq!(t.signature, "enc-2"),
+            other => panic!("expected thinking before call_2, got {other:?}"),
+        }
+        assert!(matches!(&content[3], MessageContentBlock::ToolRequest(r) if r.id == "call_2"));
 
         Ok(())
     }
@@ -2007,26 +1981,34 @@ mod tests {
 
     #[test]
     fn request_sends_reasoning_back_before_its_text_and_call() -> anyhow::Result<()> {
+        use crate::conversation::message::InferenceMetadata;
+
         let config = ModelConfig::new("gpt-6.1-terra");
         let mut metadata = ProviderMetadata::new();
         metadata.insert(
             RESPONSES_REPLAY_KEY.to_string(),
             json!({
                 "model": "gpt-6.1-terra",
-                "phase": "commentary",
-                "reasoning": [{"type": "reasoning", "summary": [], "encrypted_content": "enc-1"}]
+                "phase": "commentary"
             }),
         );
         let messages = vec![
             Message::user().with_text("Los"),
             Message::assistant()
                 .with_text("Ich sehe nach.")
+                .with_thinking("", "enc-1")
                 .with_tool_request_with_metadata(
                     "call_1",
                     Ok(CallToolRequestParams::new("shell")),
                     Some(&metadata),
                     None,
-                ),
+                )
+                .with_inference(InferenceMetadata {
+                    provider: "openai".to_string(),
+                    requested_model: "gpt-6.1-terra".to_string(),
+                    resolved_model: None,
+                    provider_session_id: None,
+                }),
         ];
 
         let payload = create_responses_request(&config, "", &messages, &[])?;
@@ -2048,6 +2030,32 @@ mod tests {
                 .all(|item| item["type"] != "reasoning"),
             "reasoning only goes back to the model that wrote it"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_reasoning_is_requested_only_without_store() -> anyhow::Result<()> {
+        let mut config = ModelConfig::new("gpt-6.1-terra");
+        let mut params = std::collections::HashMap::new();
+        params.insert("include".to_string(), json!(["file_search_call.results"]));
+        config.request_params = Some(params);
+
+        let payload = create_responses_request(&config, "", &[], &[])?;
+        assert_eq!(payload["store"], false);
+        assert_eq!(
+            payload["include"],
+            json!(["file_search_call.results", "reasoning.encrypted_content"])
+        );
+
+        let mut stored_config = ModelConfig::new("gpt-6.1-terra");
+        let mut stored_params = std::collections::HashMap::new();
+        stored_params.insert("store".to_string(), json!(true));
+        stored_config.request_params = Some(stored_params);
+
+        let stored = create_responses_request(&stored_config, "", &[], &[])?;
+        assert_eq!(stored["store"], true);
+        assert!(stored.get("include").is_none());
+
         Ok(())
     }
 
@@ -2124,6 +2132,16 @@ mod tests {
         }))?;
 
         let message = responses_api_to_message(&response)?;
+        let thinking = message
+            .content
+            .iter()
+            .find_map(|c| match c {
+                MessageContentBlock::Thinking(t) => Some(t),
+                _ => None,
+            })
+            .expect("thinking carries encrypted reasoning");
+        assert_eq!(thinking.signature, "enc-1");
+
         let replay = message
             .content
             .iter()
@@ -2131,8 +2149,7 @@ mod tests {
             .expect("tool call carries the phase");
 
         assert_eq!(replay["phase"], "commentary");
-        assert_eq!(replay["reasoning"][0]["encrypted_content"], "enc-1");
-        assert!(replay["reasoning"][0].get("id").is_none());
+        assert!(replay.get("reasoning").is_none());
         Ok(())
     }
 

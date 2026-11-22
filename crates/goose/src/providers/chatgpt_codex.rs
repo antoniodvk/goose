@@ -215,7 +215,6 @@ fn build_input_items(messages: &[Message], model_name: &str) -> Result<Vec<Value
             }
         };
 
-        let mut emitted_thinking_reasoning = false;
         for content in &message.content {
             match content {
                 MessageContent::Text(text) => {
@@ -235,24 +234,11 @@ fn build_input_items(messages: &[Message], model_name: &str) -> Result<Vec<Value
                     }));
                 }
                 MessageContent::Thinking(thinking) if message.role == Role::Assistant => {
-                    if let Some(item) = reasoning_input_item(message, thinking, model_name) {
-                        items.push(item);
-                        emitted_thinking_reasoning = true;
-                    }
+                    items.extend(reasoning_input_item(message, thinking, model_name));
                 }
                 MessageContent::ToolRequest(request) => {
-                    // The model reasons first, then writes its preamble, then calls
-                    // the tool; the preamble is still buffered in `content_items`.
-                    let replay = replay_for(request, model_name);
-                    if !emitted_thinking_reasoning {
-                        if let Some(reasoning) = replay
-                            .and_then(|replay| replay.get("reasoning"))
-                            .and_then(Value::as_array)
-                        {
-                            items.extend(reasoning.iter().cloned());
-                        }
-                    }
-                    let phase = replay.and_then(|replay| replay.get("phase"));
+                    let phase =
+                        replay_for(request, model_name).and_then(|replay| replay.get("phase"));
                     flush_text(&mut items, role, &mut content_items, phase);
                     if let Ok(tool_call) = &request.tool_call {
                         let arguments_str = match tool_call.arguments.as_ref() {
@@ -1521,20 +1507,37 @@ mod tests {
             )
     }
 
-    fn terra_replay() -> Value {
-        json!({
-            "model": "gpt-6.1-terra",
-            "phase": "commentary",
-            "reasoning": [{ "type": "reasoning", "summary": [], "encrypted_content": "enc-1" }],
-        })
+    fn terra_message() -> Message {
+        use crate::conversation::message::InferenceMetadata;
+
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            RESPONSES_REPLAY_KEY.to_string(),
+            json!({
+                "model": "gpt-6.1-terra",
+                "phase": "commentary",
+            }),
+        );
+        Message::assistant()
+            .with_text("Ich sehe nach.")
+            .with_thinking("", "enc-1")
+            .with_tool_request_with_metadata(
+                "call_1",
+                Ok(CallToolRequestParams::new("shell").with_arguments(object!({}))),
+                Some(&metadata),
+                None,
+            )
+            .with_inference(InferenceMetadata {
+                provider: "chatgpt_codex".to_string(),
+                requested_model: "gpt-6.1-terra".to_string(),
+                resolved_model: None,
+                provider_session_id: None,
+            })
     }
 
     #[test]
     fn replay_goes_back_in_the_order_the_model_wrote_it() {
-        let messages = vec![
-            Message::user().with_text("Los"),
-            assistant_with_replay(terra_replay()),
-        ];
+        let messages = vec![Message::user().with_text("Los"), terra_message()];
 
         let items = build_input_items(&messages, "gpt-6.1-terra").unwrap();
 
@@ -1547,7 +1550,7 @@ mod tests {
 
     #[test]
     fn replay_is_not_sent_to_another_model() {
-        let messages = vec![assistant_with_replay(terra_replay())];
+        let messages = vec![terra_message()];
 
         let items = build_input_items(&messages, "gpt-6-sol").unwrap();
 
