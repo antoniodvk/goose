@@ -28,6 +28,7 @@ pub mod state_machine;
 mod state_machine_builder;
 pub mod subagent_execution_tool;
 pub(crate) mod subagent_handler;
+pub(crate) mod subagent_plain_output;
 pub(crate) mod subagent_task_config;
 mod tool_confirmation_coordinator;
 pub mod tool_execution;

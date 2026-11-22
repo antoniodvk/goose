@@ -16,6 +16,7 @@ use crate::agents::state_machine::{
     applied, ends_turn, messages_since_kickoff, not_applicable, Emitter, GooseEffect, Operation,
     OperationResult,
 };
+use crate::agents::subagent_plain_output::answers_in_plain_text;
 use crate::conversation::message::{Message, MessageContent, ToolRequest};
 use crate::conversation::Conversation;
 use crate::providers::base::Provider;
@@ -113,6 +114,9 @@ impl Operation<Session, GooseEffect> for FinalOutputOperation {
         session: &Session,
         _conversation: &Conversation,
     ) -> Result<Vec<(String, String)>> {
+        if answers_in_plain_text(self.provider.as_ref(), session) {
+            return Ok(Vec::new());
+        }
         Ok(final_output_tool(session)?
             .map(|tool| ("final_output".to_string(), tool.system_prompt()))
             .into_iter()
@@ -129,6 +133,9 @@ impl Operation<Session, GooseEffect> for FinalOutputOperation {
             return not_applicable();
         };
 
+        if answers_in_plain_text(self.provider.as_ref(), session) {
+            return not_applicable();
+        }
         if !self.provider.supports_builtin_tools() {
             return command_error(
                 conversation,

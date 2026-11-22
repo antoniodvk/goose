@@ -151,6 +151,8 @@ impl ForegroundSubagentRunner {
             ended: false,
         };
         let run_result = self.run_to_end(&subagent, cancel.clone(), &to_parent).await;
+        let plain = run_result.is_ok()
+            && crate::agents::subagent_plain_output::runs_plain(&self.services, &subagent).await;
         ending.end().await;
         let stopped = cancel.is_cancelled();
         let subagent = match self.session_manager().get_session(&subagent.id, true).await {
@@ -169,6 +171,12 @@ impl ForegroundSubagentRunner {
         }
         if let Err(error) = run_result {
             return SubagentOutcome::Failed(error.to_string());
+        }
+        if let Some(output) = plain
+            .then(|| crate::agents::subagent_plain_output::plain_output(latest_turn))
+            .flatten()
+        {
+            return SubagentOutcome::Completed(output);
         }
         SubagentOutcome::Failed(failure_reason(latest_turn))
     }
