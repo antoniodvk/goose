@@ -2,6 +2,7 @@ mod common;
 mod handoff;
 #[cfg(feature = "acp-http")]
 mod mcp_app_proxy;
+mod prompt_cancel;
 mod provider;
 mod response_builder;
 pub mod server;

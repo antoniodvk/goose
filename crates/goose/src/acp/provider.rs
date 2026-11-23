@@ -1671,8 +1671,12 @@ impl AcpClientLoop {
                         let tx =
                             handler.ok_or_else(agent_client_protocol::Error::internal_error)?;
 
+                        // A closed channel means goose stopped this prompt (C411); ACP wants
+                        // permission requests of a cancelled prompt answered as cancelled.
                         if tx.is_closed() {
-                            return Err(agent_client_protocol::Error::internal_error());
+                            return responder.respond(RequestPermissionResponse::new(
+                                RequestPermissionOutcome::Cancelled,
+                            ));
                         }
 
                         tx.try_send(AcpUpdate::PermissionRequest {
@@ -1976,9 +1980,12 @@ async fn handle_requests(
             } => {
                 *prompt_response_tx.lock().unwrap() = Some(response_tx.clone());
 
-                let response: Result<PromptResponse, _> = cx
-                    .send_request(PromptRequest::new(session_id, content))
-                    .block_task()
+                let response: Result<PromptResponse, _> =
+                    super::prompt_cancel::send_prompt_forwarding_stop(
+                        &cx,
+                        PromptRequest::new(session_id, content),
+                        response_tx.closed(),
+                    )
                     .await;
 
                 match response {
@@ -3306,7 +3313,11 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let _action_required = stream.next().await.expect("expected action_required").unwrap();
+            let _action_required = stream
+                .next()
+                .await
+                .expect("expected action_required")
+                .unwrap();
             assert!(
                 provider
                     .handle_permission_confirmation(
@@ -3327,7 +3338,11 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let (message, usage) = stream.next().await.expect("expected denial message").unwrap();
+            let (message, usage) = stream
+                .next()
+                .await
+                .expect("expected denial message")
+                .unwrap();
             assert!(usage.is_none());
             denial_messages.push(message.expect("expected denial message content"));
         }
