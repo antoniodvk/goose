@@ -6,7 +6,9 @@
 //! the model. The system prompt lists their names under "Deferred tools", and `tool_search` loads
 //! the ones a task needs: from the next request on they are in the tool list. A server keeps a tool
 //! in the list from the start by setting `_meta["anthropic/alwaysLoad"]` to true, the key Claude
-//! Code reads.
+//! Code reads. Like Claude Code's per-server `alwaysLoad`, `GOOSE_TOOL_SEARCH_ALWAYS_LOAD` (a list of
+//! extension names) keeps all tools of those extensions in the list, except a tool whose server sets
+//! `_meta["anthropic/alwaysLoad"]` to false (C409).
 //!
 //! What has been loaded is read from the conversation, not stored separately: the names a
 //! `tool_search` result carries in its `_meta`, plus every tool the conversation has called. The set
@@ -29,6 +31,9 @@ pub const TOOL_SEARCH_TOOL_NAME: &str = "tool_search";
 pub const TOOL_SEARCH_CONFIG_KEY: &str = "GOOSE_TOOL_SEARCH";
 /// Per-tool opt-out of deferral, set by the server in the tool's `_meta` (Claude Code's key).
 pub const ALWAYS_LOAD_META_KEY: &str = "anthropic/alwaysLoad";
+/// Config key (environment as JSON array, or config.yaml list): extensions whose tools are never
+/// deferred, like Claude Code's `alwaysLoad: true` on an MCP server (C409).
+pub const ALWAYS_LOAD_EXTENSIONS_CONFIG_KEY: &str = "GOOSE_TOOL_SEARCH_ALWAYS_LOAD";
 /// Names a `tool_search` result loaded, kept in the result's `_meta` for later requests.
 pub const LOADED_TOOLS_META_KEY: &str = "goose_tool_search_loaded";
 
@@ -54,12 +59,39 @@ pub(crate) fn active_for(switched_on: bool, tools: &ToolSnapshot) -> bool {
     switched_on
 }
 
-pub(crate) fn always_loaded(tool: &Tool) -> bool {
+/// The server's own choice for a tool: `Some(true)` keeps it upfront, `Some(false)` defers it even
+/// when its extension is always loaded, `None` leaves it to the extension setting.
+fn always_load_meta(tool: &Tool) -> Option<bool> {
     tool.meta
         .as_ref()
         .and_then(|meta| meta.0.get(ALWAYS_LOAD_META_KEY))
         .and_then(Value::as_bool)
-        .unwrap_or(false)
+}
+
+/// Extensions from `GOOSE_TOOL_SEARCH_ALWAYS_LOAD`, lowercased like the tool name prefixes.
+fn always_load_extensions() -> HashSet<String> {
+    Config::global()
+        .get_param::<Vec<String>>(ALWAYS_LOAD_EXTENSIONS_CONFIG_KEY)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| name.trim().to_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// Whether a tool goes to the model from the start: goose' own tools, tools the server marks
+/// always-loaded, and tools of an always-loaded extension the server does not hold back.
+fn upfront(tool: &Tool, own: bool, extensions: &HashSet<String>) -> bool {
+    if own {
+        return true;
+    }
+    match always_load_meta(tool) {
+        Some(value) => value,
+        None => tool
+            .name
+            .split_once("__")
+            .is_some_and(|(extension, _)| extensions.contains(&extension.to_lowercase())),
+    }
 }
 
 /// The tools of a lease, split into the ones the model always gets and the ones it loads on demand.
@@ -71,9 +103,14 @@ pub(crate) struct ToolPartition {
 impl ToolPartition {
     /// `entries` pairs each tool with whether its extension is part of goose itself.
     pub fn new(entries: Vec<(Tool, bool)>) -> Self {
+        Self::with_always_load(entries, &always_load_extensions())
+    }
+
+    /// As `new`, with the always-loaded extensions given instead of read from the config.
+    pub fn with_always_load(entries: Vec<(Tool, bool)>, extensions: &HashSet<String>) -> Self {
         let (upfront, deferrable): (Vec<_>, Vec<_>) = entries
             .into_iter()
-            .partition(|(tool, own)| *own || always_loaded(tool));
+            .partition(|(tool, own)| upfront(tool, *own, extensions));
         Self {
             upfront: upfront.into_iter().map(|(tool, _)| tool).collect(),
             deferrable: deferrable.into_iter().map(|(tool, _)| tool).collect(),
@@ -391,12 +428,15 @@ mod tests {
 
     #[test]
     fn own_tools_and_always_loaded_tools_stay_upfront() {
-        let partition = ToolPartition::new(vec![
-            (tool("shell", "Run a command"), true),
-            (tool("tavily__tavily_search", "Search the web"), false),
-            (always_load(tool("fragen__ask_user", "Ask"), true), false),
-            (always_load(tool("x__y", "Deferred anyway"), false), false),
-        ]);
+        let partition = ToolPartition::with_always_load(
+            vec![
+                (tool("shell", "Run a command"), true),
+                (tool("tavily__tavily_search", "Search the web"), false),
+                (always_load(tool("fragen__ask_user", "Ask"), true), false),
+                (always_load(tool("x__y", "Deferred anyway"), false), false),
+            ],
+            &HashSet::new(),
+        );
         let upfront: Vec<&str> = partition.upfront.iter().map(|t| t.name.as_ref()).collect();
         let deferrable: Vec<&str> = partition
             .deferrable
@@ -413,6 +453,42 @@ mod tests {
             .map(|t| t.name.to_string())
             .collect();
         assert_eq!(callable, ["shell", "fragen__ask_user", "x__y"]);
+    }
+
+    #[test]
+    fn always_loaded_extensions_stay_upfront_unless_a_tool_opts_out() {
+        let extensions = HashSet::from(["sosumi".to_string(), "tavily".to_string()]);
+        let partition = ToolPartition::with_always_load(
+            vec![
+                (tool("Sosumi__searchAppleDocumentation", "Search"), false),
+                (tool("tavily__tavily_search", "Search the web"), false),
+                (
+                    always_load(tool("tavily__tavily_crawl", "Crawl"), false),
+                    false,
+                ),
+                (tool("nomac__start_mac", "Start a Mac"), false),
+                (tool("sosumi_extra__x", "Other extension"), false),
+            ],
+            &extensions,
+        );
+        let upfront: Vec<&str> = partition.upfront.iter().map(|t| t.name.as_ref()).collect();
+        let deferrable: Vec<&str> = partition
+            .deferrable
+            .iter()
+            .map(|t| t.name.as_ref())
+            .collect();
+        assert_eq!(
+            upfront,
+            ["Sosumi__searchAppleDocumentation", "tavily__tavily_search"]
+        );
+        assert_eq!(
+            deferrable,
+            [
+                "tavily__tavily_crawl",
+                "nomac__start_mac",
+                "sosumi_extra__x"
+            ]
+        );
     }
 
     #[test]
