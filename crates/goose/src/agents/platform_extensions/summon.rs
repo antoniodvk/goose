@@ -2135,6 +2135,9 @@ mod tests {
         let other_parent = create_session(&manager, &temp_dir, SessionType::User, None).await?;
         let subagent =
             create_session(&manager, &temp_dir, SessionType::SubAgent, Some(&parent.id)).await?;
+        let completed =
+            create_session(&manager, &temp_dir, SessionType::SubAgent, Some(&parent.id)).await?;
+        complete_task(&manager, &completed.id).await?;
         let others = create_session(
             &manager,
             &temp_dir,

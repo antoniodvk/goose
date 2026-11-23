@@ -221,24 +221,25 @@ mod tests {
         }
     }
 
-    async fn test_server(root: &std::path::Path) -> Arc<GooseAcpAgent> {
-        let active_runs = Arc::new(ActiveRunRegistry::default());
-        let live_voice = Arc::new(LiveVoiceService::from_config(active_runs.clone()));
+    async fn test_server(root: &std::path::Path) -> Arc<AcpConnection> {
+        let services = StateMachineServices::with_config(acp_services_config(
+            Arc::new(SessionManager::new(root.to_path_buf())),
+            root.to_path_buf(),
+            true,
+            GoosePlatform::GooseCli,
+        ));
+        let live_voice = Arc::new(LiveVoiceService::from_config(services.runtime.runs.clone()));
         let provider_factory: AcpProviderFactory = Arc::new(|_provider_name| {
             Box::pin(async { Err(anyhow::anyhow!("unused provider factory")) })
         });
         Arc::new(
-            GooseAcpAgent::new(GooseAcpAgentOptions {
+            AcpConnection::new(AcpConnectionOptions {
                 provider_factory,
                 builtin_selection: AcpBuiltinSelection::default(),
-                data_dir: root.to_path_buf(),
                 config_dir: root.to_path_buf(),
-                disable_session_naming: true,
-                goose_platform: GoosePlatform::GooseCli,
+                services,
                 additional_source_roots: Vec::new(),
-                scheduler: None,
                 session_cwd: None,
-                active_runs,
                 live_voice,
             })
             .await
@@ -247,11 +248,12 @@ mod tests {
     }
 
     async fn register_session(
-        server: &GooseAcpAgent,
+        server: &AcpConnection,
         root: &std::path::Path,
         provider: Arc<dyn Provider>,
     ) -> String {
         let session = server
+            .services
             .session_manager
             .create_session(
                 root.to_path_buf(),
@@ -261,14 +263,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let session_agent = Agent::with_config(AgentConfig::new(
-            server.session_manager.clone(),
-            server.permission_manager.clone(),
-            None,
-            true,
-            GoosePlatform::GooseCli,
-        ));
-        session_agent
+        server
+            .services
             .update_provider(
                 provider,
                 goose_providers::model::ModelConfig::new("gpt-5"),
@@ -276,9 +272,7 @@ mod tests {
             )
             .await
             .unwrap();
-        server
-            .register_acp_session(session.id.clone(), session_agent)
-            .await;
+        server.register_acp_session(session.id.clone()).await;
         session.id
     }
 
@@ -314,8 +308,7 @@ mod tests {
         let provider = Arc::new(BackgroundTaskProvider::new());
         let session_id = register_session(&server, root.path(), provider.clone()).await;
         // Registered again with the same provider, as a reload does.
-        let agent = server.get_session_agent(&session_id).await.unwrap();
-        server.register_acp_session(session_id.clone(), agent).await;
+        server.register_acp_session(session_id.clone()).await;
 
         let (client_read, server_write) = tokio::io::duplex(64 * 1024);
         let (server_read, client_write) = tokio::io::duplex(64 * 1024);

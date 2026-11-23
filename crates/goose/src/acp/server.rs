@@ -3680,7 +3680,7 @@ print(\"hello, world\")
             )),
         ];
 
-        let message = GooseAcpAgent::convert_acp_prompt_to_message(&prompt);
+        let message = AcpConnection::convert_acp_prompt_to_message(&prompt);
 
         assert_eq!(message.content.len(), 2);
         let MessageContent::Document(document) = &message.content[1] else {
@@ -3704,7 +3704,7 @@ print(\"hello, world\")
             ),
         ))];
 
-        let message = GooseAcpAgent::convert_acp_prompt_to_message(&prompt);
+        let message = AcpConnection::convert_acp_prompt_to_message(&prompt);
 
         assert_eq!(message.content.len(), 1);
         let MessageContent::Document(document) = &message.content[0] else {
@@ -3732,7 +3732,7 @@ print(\"hello, world\")
             )),
         ];
 
-        let message = GooseAcpAgent::convert_acp_prompt_to_message(&prompt);
+        let message = AcpConnection::convert_acp_prompt_to_message(&prompt);
 
         assert!(message.content.is_empty());
     }

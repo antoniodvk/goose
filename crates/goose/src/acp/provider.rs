@@ -3278,7 +3278,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(1);
         let (provider, model) = test_provider_with_tx(Some(tx));
-        *provider.goose_mode.lock().unwrap() = GooseMode::Chat;
+        *provider.goose_mode.lock().unwrap() = GooseMode::Approve;
 
         let messages = vec![Message::user().with_text("inspect src/lib.rs")];
         let mut stream = provider.stream(&model, "", &messages, &[]).await.unwrap();
@@ -3288,16 +3288,36 @@ mod tests {
             _ => panic!("expected ACP prompt request"),
         };
 
+        let mut denial_messages = Vec::new();
         for id in ["call-1", "call-2"] {
+            let (perm_tx, _perm_rx) = tokio::sync::oneshot::channel();
             response_tx
-                .send(AcpUpdate::ToolCallStart {
-                    id: id.to_string(),
-                    name: "read_file".to_string(),
-                    kind: ToolKind::Read,
-                    raw_input: None,
+                .send(AcpUpdate::PermissionRequest {
+                    request: Box::new(RequestPermissionRequest::new(
+                        SessionId::new("test-session"),
+                        agent_client_protocol::schema::v1::ToolCallUpdate::new(
+                            id,
+                            agent_client_protocol::schema::v1::ToolCallUpdateFields::new()
+                                .title("read_file"),
+                        ),
+                        vec![],
+                    )),
+                    response_tx: perm_tx,
                 })
                 .await
                 .unwrap();
+            let _action_required = stream.next().await.expect("expected action_required").unwrap();
+            assert!(
+                provider
+                    .handle_permission_confirmation(
+                        id,
+                        &PermissionConfirmation {
+                            principal_type: PrincipalType::Tool,
+                            permission: Permission::DenyOnce,
+                        },
+                    )
+                    .await
+            );
             response_tx
                 .send(AcpUpdate::ToolCallComplete {
                     id: id.to_string(),
@@ -3307,37 +3327,33 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            let (message, usage) = stream.next().await.expect("expected denial message").unwrap();
+            assert!(usage.is_none());
+            denial_messages.push(message.expect("expected denial message content"));
         }
         response_tx
             .send(AcpUpdate::Complete(StopReason::EndTurn, None))
             .await
             .unwrap();
-
-        let mut messages = Vec::new();
+        drop(response_tx);
         while let Some(item) = stream.next().await {
-            let (message, usage) = item.unwrap();
-            assert!(usage.is_none());
-            if let Some(message) = message {
-                messages.push(message);
-            }
+            let _ = item.unwrap();
         }
 
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].as_concat_text(), "Tool call was denied.");
-        assert_eq!(messages[1].as_concat_text(), "Tool call was denied.");
-
-        let first_id = messages[0]
-            .id
-            .as_deref()
-            .expect("first denial should have a provider message ID");
-        let second_id = messages[1]
-            .id
-            .as_deref()
-            .expect("second denial should have a provider message ID");
-
-        assert!(first_id.starts_with("msg_"));
-        assert!(second_id.starts_with("msg_"));
-        assert_ne!(first_id, second_id);
+        assert_eq!(denial_messages.len(), 2);
+        let mut denial_tool_ids = Vec::new();
+        for message in &denial_messages {
+            let MessageContent::ToolResponse(tr) = &message.content[0] else {
+                panic!("expected tool response, got {:?}", message.content);
+            };
+            let result = tr.tool_result.as_ref().unwrap();
+            assert_eq!(
+                result.content[0].as_text().unwrap().text,
+                "Tool call was denied."
+            );
+            denial_tool_ids.push(tr.id.clone());
+        }
+        assert_eq!(denial_tool_ids, vec!["call-1", "call-2"]);
     }
 
     #[test]
