@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
 
+mod interleaved_tools;
 pub mod message;
 pub mod token_usage;
 mod tool_request;
@@ -277,6 +278,7 @@ fn fix_messages(messages: Vec<Message>) -> (Vec<Message>, Vec<String>) {
         remove_empty_messages,
         fix_empty_tool_results,
         fix_tool_calling,
+        interleaved_tools::group_interleaved_tool_calls,
         merge_consecutive_messages,
         dedupe_signed_thinking,
         fix_lead_trail,
